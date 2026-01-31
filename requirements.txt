@@ -1,0 +1,18 @@
+# Pip fallback (prefer `environment.yaml`).
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+seaborn
+statsmodels
+notebook
+ipykernel
+hdbscan
+umap-learn
+tabulate
+nbclient
+nbconvert
+nbformat
+jupyter_server
+jupyterlab
