@@ -1,5 +1,4 @@
-# Mental Health in Tech (OSMI 2016) — Clean Client Repo
-
+# Mental Health in Tech (OSMI 2016)
 This folder is a minimal, self-contained client delivery for running the unified HR segmentation analysis.
 
 ## What’s included
