@@ -20,7 +20,3 @@ From this directory:
 2) Launch notebook
 
 - `jupyter notebook analysis.ipynb`
-
-## Notes
-
-UMAP is used primarily for visualization and for demonstrating how nonlinear embeddings can change apparent separability. Cluster interpretation emphasizes stability and simple, HR-actionable levers; overlays on mental-health outcomes are descriptive (association, not causation).
