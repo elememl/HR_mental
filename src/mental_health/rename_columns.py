@@ -1,17 +1,11 @@
 import pandas as pd
 from pathlib import Path
 
-# ---- paths ----
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_PATH = PROJECT_ROOT / "data" / "raw" / "survey.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
 
-# ---- load ----
-
 df = pd.read_csv(RAW_PATH)
-
-# ---- rename mapping ----
 
 rename_map = {
     "Are you self-employed?": "self_employed",
@@ -79,12 +73,8 @@ rename_map = {
     "Do you work remotely?": "remote_work",
 }
 
-# ---- apply rename ----
 
 df_renamed = df.rename(columns=rename_map)
-
-# ---- save ----
-
 df_renamed.to_csv(OUT_PATH, index=False)
 
 print("Renamed file saved to:", OUT_PATH)
