@@ -16,4 +16,5 @@ dependencies:
   - pip
   - pip:
       - plotly==6.5.2
+      - kaleido==0.2.1
       - scikit-learn-extra==0.3.0

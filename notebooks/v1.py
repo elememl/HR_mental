@@ -5,7 +5,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 #% 01 Rename Columns
 import pandas as pd
-from pathlib import Path
 
 RAW_PATH = PROJECT_ROOT / "data" / "raw" / "survey.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
@@ -82,10 +81,6 @@ rename_map = {
 df_renamed = df.rename(columns=rename_map)
 df_renamed.to_csv(OUT_PATH, index=False)
 
-print("Renamed file saved to:", OUT_PATH)
-print("\nNew columns:")
-print(list(df_renamed.columns))
-
 #% 02 Cleaning + Drivers + Overlays
 from typing import Tuple
 import pandas as pd
@@ -117,7 +112,7 @@ def filter_not_self_employed(df: pd.DataFrame) -> pd.DataFrame:
     # Drop the defining column (everyone left is not self-employed)
     df2 = df2.drop(columns=["self_employed"], errors="ignore")
 
-    _log_change("Step 1 (remove self-employed)", before, df2)
+    _log_change("remove self-employed", before, df2)
     return df2
 
 
@@ -156,7 +151,7 @@ def filter_tech_role(df: pd.DataFrame) -> pd.DataFrame:
     # Drop the defining column
     df2 = df2.drop(columns=["tech_role"], errors="ignore")
 
-    _log_change("Step 2 (remove explicit non-tech roles)", before, df2)
+    _log_change("remove explicit non-tech roles", before, df2)
     return df2
 
 
@@ -383,8 +378,7 @@ def main() -> None:
     print("\nCheck consistency:")
     print("Rows where tech_company == 0:", n_non_tech_company)
     print("Rows where tech_company == 0 AND tech_role == 1:", n_tech_role_yes)
-    print("Subset size:", n_subset)
-    print("Are ALL non-tech-company rows tech-role workers?", (n_subset == n_tech_role_yes))
+    # subset size and boolean summary output removed
 
     # ---------------------------------------------------------------------
     # Main cleaning pipeline (drops self_employed and tech_role)
@@ -404,8 +398,13 @@ def main() -> None:
     # ---------------------------------------------------------------------
     row_miss = df_clean.isna().mean(axis=1)
 
-    print("\nRow missingness summary (fraction missing):")
-    print(row_miss.describe()[["min", "25%", "50%", "75%", "max"]].round(3))
+    summary = (row_miss.describe()[["min", "max"]] * 100).round(1)
+    summary.index = ["min", "max"]
+    try:
+        from IPython.display import display
+        display(summary.to_frame(name="Row missingness (%)"))
+    except Exception:
+        print(summary.to_string())
 
     plt.figure(figsize=(8, 5), dpi=150)
     plt.hist(row_miss, bins=20)
@@ -432,8 +431,11 @@ def main() -> None:
     # Format % nicely for printing
     top15["missing_percent"] = top15["missing_percent"].map(lambda x: f"{x:.2f}%")
 
-    print("\nTop 15 columns by missingness:")
-    print(top15)
+    try:
+        from IPython.display import display, HTML
+        display(HTML(top15.to_html(index=False)))
+    except Exception:
+        print(top15)
 
     # Histogram of column missingness (fractions)
     col_miss = df_clean.isna().mean()
@@ -445,8 +447,8 @@ def main() -> None:
     plt.tight_layout()
     plt.show()
 
-    # Bar plot: missingness per feature (sorted)
-    col_miss_sorted = col_miss.sort_values(ascending=False)
+    # Bar plot: missingness per feature (sorted) — only features with missingness
+    col_miss_sorted = col_miss[col_miss > 0].sort_values(ascending=False)
     plt.figure(figsize=(10, 6), dpi=150)
     plt.bar(col_miss_sorted.index, col_miss_sorted.values)
     plt.xticks(rotation=90)
@@ -464,10 +466,9 @@ def main() -> None:
     df_clean = df_clean.drop(columns=fully_missing_cols)
     rows_after, cols_after = df_clean.shape
 
-    print("\nDropped columns with 100% missingness:")
-    print(list(fully_missing_cols))
+    removed_cols = cols_before - cols_after
     print(
-        f"\nRemoved {cols_before - cols_after} columns and {rows_before - rows_after} rows "
+        f"\nRemoved {removed_cols} (100% missingness) columns: "
         f"(shape {rows_before, cols_before} -> {rows_after, cols_after})"
     )
 
@@ -483,7 +484,6 @@ def main() -> None:
     overlay_path = PROJECT_ROOT / "data" / "out" / "overlays_clean.csv"
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
     df_overlays.to_csv(overlay_path, index=False)
-    print("Saved overlays:", overlay_path)
 
     # ---------------------------------------------------------------------
     # Remove overlay columns from drivers BEFORE saving drivers
@@ -537,8 +537,13 @@ def main() -> None:
 
     audit_df = pd.DataFrame(rows).sort_values("% missing", ascending=False).reset_index(drop=True)
 
-    # Show as image-table (like your plots)
-    show_table(audit_df, "Driver feature audit: missingness / unique / dominant share", max_rows=30, figsize=(12, 8))
+    # Show only features with any missingness (matches requested view) as text table
+    audit_missing = audit_df[audit_df["% missing"] > 0].reset_index(drop=True)
+    try:
+        from IPython.display import display, HTML
+        display(HTML(audit_missing.to_html(index=False)))
+    except Exception:
+        print(audit_missing.to_string(index=False))
 
     # ---------------------------------------------------------------------
     # MISSINGNESS CORRELATION (pairs) - also show as table image
@@ -556,8 +561,7 @@ def main() -> None:
 
     corr_pairs_df = pd.DataFrame(pairs).sort_values("corr", ascending=False).reset_index(drop=True)
 
-    # Show as image-table too
-    show_table(corr_pairs_df, "Strong missingness-correlation pairs (|corr| >= 0.95)", max_rows=30, figsize=(12, 8))
+    # Strong missingness-correlation pairs table removed per request
 
     # Contingency table for benefits and mh_options_known
 
@@ -587,23 +591,28 @@ def main() -> None:
         dropna=False
     )
 
-    print("\nFULL contingency table (including NaN & Not applicable):")
-    print(full_ct)
+    try:
+        from IPython.display import display, HTML
+        display(HTML("<b>Contingency table (raw)</b>" + full_ct.to_html()))
+    except Exception:
+        print(full_ct)
 
     # apply parent-child question changes
     df_drivers = apply_driver_skip_logic(df_drivers)
 
 
     # contigency table after applying rule C and enforcing 'non applicable'
-    print("\nFULL contingency table AFTER Rule C (including NaN & Not applicable):")
-
     ct_after = pd.crosstab(
         df_drivers["benefits"],
         df_drivers["mh_options_known"],
         dropna=False
     )
 
-    print(ct_after)
+    try:
+        from IPython.display import display, HTML
+        display(HTML("<b>Contingency table (after Rule C)</b>" + ct_after.to_html()))
+    except Exception:
+        print(ct_after)
 
 
     # ============================================================
@@ -691,38 +700,17 @@ def main() -> None:
     proof_metrics_df = pd.DataFrame(proof_metrics)
 
     if proof_metrics_df.empty:
-        show_table(
-            pd.DataFrame([{
-                "result": "INFO",
-                "message": "No skip-logic rules matched columns in df_drivers (nothing to prove)."
-            }]),
-            "Structural missingness proof — INFO",
-            max_rows=5,
-            figsize=(12, 2.5)
-        )
+        print("\nStructural missingness proof — INFO")
+        print("No skip-logic rules matched columns in df_drivers (nothing to prove).")
     else:
-        # compact and readable
-        cols = ["rule", "child", "rows_where_not_applicable", "NA_token_count", "NaN_count", "Other_value_count",
-                "PASS"]
-        show_table(
-            proof_metrics_df[cols].sort_values(["PASS", "rows_where_not_applicable"],
-                                               ascending=[True, False]).reset_index(drop=True),
-            "Structural missingness proof — metrics per rule/child",
-            max_rows=50,
-            figsize=(16, 6)
-        )
+        # Structural missingness proof table removed per request
+        pass
 
     # ---------- TABLE 1B: failures only (only if needed) ----------
     fail_df = pd.DataFrame(proof_failures)
     if not fail_df.empty:
-        show_table(
-            fail_df[["rule", "child", "rows_where_not_applicable", "NA_token_count", "NaN_count", "Other_value_count",
-                     "PASS"]]
-            .reset_index(drop=True),
-            "Structural missingness proof — FAILURES (investigate)",
-            max_rows=50,
-            figsize=(16, 5)
-        )
+        # Failures table removed per request
+        pass
 
     # ---------- TABLE 2: TRUE missingness only (NaN), no redundancy ----------
     drivers = df_drivers.drop(columns=["respondent_id"], errors="ignore")
@@ -748,24 +736,18 @@ def main() -> None:
             "missing_%": (miss_nan.values / n * 100).round(2),
         }).reset_index(drop=True)
 
-        show_table(true_miss_df, "True missingness (NaN only) — nonzero features", max_rows=50, figsize=(14, 6))
+        try:
+            from IPython.display import display, HTML
+            display(HTML(true_miss_df.to_html(index=False)))
+        except Exception:
+            print(true_miss_df.to_string(index=False))
 
         # Dependency situation (NO threshold): show top 20 |corr| among NaN indicators
         miss_bin = drivers[miss_nan.index].isna().astype(int)
 
         if miss_bin.shape[1] >= 2:
-            corr = miss_bin.corr()
-            pairs = (
-                corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-                .stack()
-                .reset_index()
-            )
-            pairs.columns = ["feature_1", "feature_2", "corr"]
-            pairs["abs_corr"] = pairs["corr"].abs()
-            pairs = pairs.sort_values("abs_corr", ascending=False).drop(columns=["abs_corr"]).reset_index(drop=True)
-
-            show_table(pairs.head(20), "True-missingness dependencies — top 20 |corr| (no threshold)", max_rows=20,
-                       figsize=(14, 6))
+            # dependencies print removed
+            pass
         else:
             show_table(
                 pd.DataFrame([{
@@ -834,45 +816,13 @@ def main() -> None:
             df_drivers[col] = df_drivers[col].astype(int)
 
     # AFTER: confirm binaries are now int 0/1
-    print("\n=== BINARY CHECK (AFTER standardization) ===")
-    for col in binary_cols:
-        if col in df_drivers.columns:
-            print(col)
-            print(df_drivers[col].value_counts(dropna=False))
-            print("dtype:", df_drivers[col].dtype)
+    # binary check prints removed
 
     # ============================================================
     # POST-FIX VALIDATION CHECKS
     # ============================================================
 
-    print("\n=== POST-FIX VALIDATION ===")
-
-    # ---------- 1) Confirm no true NaN remains (except respondent_id) ----------
-
-    nan_counts = df_drivers.drop(columns=["respondent_id"], errors="ignore").isna().sum()
-    nan_remaining = nan_counts[nan_counts > 0]
-
-    print("\nRemaining NaN counts per feature:")
-    print(nan_remaining if not nan_remaining.empty else "NONE (all true missingness handled)")
-
-    # ---------- 2) Updated contingency table (benefits vs mh_options_known) ----------
-
-    print("\nContingency table AFTER full missingness handling:")
-
-    ct_final = pd.crosstab(
-        df_drivers["benefits"],
-        df_drivers["mh_options_known"],
-        dropna=False
-    )
-
-    print(ct_final)
-
-    # ---------- 3) Value distributions for previously missing features ----------
-
-    for col in ["ever_observed_mhd_bad_response", "mhdcoworker_you_not_reveal", "mh_options_known"]:
-        if col in df_drivers.columns:
-            print(f"\nValue counts for {col}:")
-            print(df_drivers[col].value_counts(dropna=False))
+    # POST-FIX VALIDATION prints removed by request
 
     # feature type audit
     pd.set_option("display.max_colwidth", None)
@@ -888,21 +838,11 @@ def main() -> None:
             continue
 
         s = df_drivers[col]
-
-        # get example values (up to 5 most common)
         examples = s.value_counts(dropna=False).head(5).index.tolist()
-
-        # number of unique observed values
-        n_unique = s.nunique(dropna=True)
-
-        # dominant share
-        dominant_share = round((s.value_counts().iloc[0] / len(s)) * 100, 2)
 
         audit_rows.append({
             "feature": col,
             "example_values": examples,
-            "n_unique": n_unique,
-            "dominant_share_%": dominant_share,
         })
 
     audit_table = pd.DataFrame(audit_rows)
@@ -915,7 +855,7 @@ def main() -> None:
     out_path = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df_drivers.to_csv(out_path, index=False)
-    print("Saved drivers:", out_path)
+    # saved drivers message removed
 
 
 main()
@@ -927,8 +867,7 @@ import pandas as pd
 IN_PATH = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
 
-print("IN_PATH:", IN_PATH)
-print("Exists?", IN_PATH.exists())
+_ = IN_PATH.exists()
 
 # -------------------
 # Helpers / constants
@@ -1294,10 +1233,7 @@ def main() -> None:
     if "respondent_id" not in df.columns:
         raise ValueError("survey_drivers.csv must contain respondent_id")
 
-    # ===== RECORD 0: INPUT SHAPE =====
-    print("\n=== INPUT: survey_drivers.csv ===")
-    print("rows, cols:", df.shape)
-    print("driver features (excluding respondent_id):", df.shape[1] - 1)
+    # input shape prints removed
 
     # -------------------
     # 1) Binary
@@ -1313,9 +1249,7 @@ def main() -> None:
     for c in binary_cols:
         out[c] = df[c].astype(int)
 
-    print("\n=== AFTER BINARY ===")
-    print("binary_cols kept:", binary_cols)
-    print("out rows, cols:", out.shape)
+    # after-binary prints removed
 
     # -------------------
     # 2) Nominal (one-hot)
@@ -1332,9 +1266,7 @@ def main() -> None:
     ]
     nominal_cols = [c for c in nominal_cols if c in df.columns]
 
-    print("\n=== NOMINAL INPUT FEATURES ===")
-    print("nominal_cols used:", nominal_cols)
-    print("count nominal original features:", len(nominal_cols))
+    # nominal input prints removed
 
     X_nom = df[nominal_cols].copy()
     X_nom = X_nom.fillna("NaN")
@@ -1343,25 +1275,16 @@ def main() -> None:
 
     nom_dum = pd.get_dummies(X_nom, prefix=nominal_cols, prefix_sep="=")
 
-    print("\n=== NOMINAL ONE-HOT OUTPUT ===")
-    print("total one-hot columns created from nominal:", nom_dum.shape[1])
-
-    print("\nNominal feature expansion details:")
-    for c in nominal_cols:
-        created_cols = [col for col in nom_dum.columns if col.startswith(f"{c}=")]
-        categories = [col.split("=", 1)[1] for col in created_cols]
-        print(f"- {c}: {len(created_cols)} columns -> {categories}")
+    # nominal one-hot detail prints removed
 
     cols_before = out.shape[1]
     out = out.join(nom_dum)
-    print("\n=== AFTER NOMINAL ===")
-    print("columns added:", out.shape[1] - cols_before)
-    print("out rows, cols:", out.shape)
+    # after nominal prints removed
 
     # -------------------
     # 3) Ordinal
     # -------------------
-    print("\n=== ORDINAL INPUT FEATURES ===")
+    # ordinal input prints removed
     ordinal_cols = [
         "company_size",
         "remote_work",
@@ -1374,61 +1297,38 @@ def main() -> None:
     ]
     ordinal_cols = [c for c in ordinal_cols if c in df.columns]
 
-    print("ordinal_cols used:", ordinal_cols)
-    print("count ordinal original features:", len(ordinal_cols))
+    # ordinal input prints removed
 
     ord_out = pd.DataFrame(index=df.index)
 
     for c in ordinal_cols:
         if c == "company_size":
-            print("- company_size -> company_size_ord (robust)")
             raw_vals = sorted(df["company_size"].dropna().astype(str).map(norm_str).unique().tolist())
-            print("  observed categories (raw):", raw_vals)
             ord_out["company_size_ord"] = encode_company_size(df["company_size"])
-            print("  mapping used (text bins):", ORDINAL_MAPS["company_size"])
         else:
             mapping = ORDINAL_MAPS[c]
             s = df[c].map(norm_str).astype("string")
-            print(f"- {c} -> {c}_ord")
-            print("  observed categories:", sorted(s.dropna().unique().tolist()))
-            print("  mapping used:", mapping)
             ord_out[f"{c}_ord"] = encode_ordinal(df[c], mapping, c)
 
     cols_before = out.shape[1]
     out = out.join(ord_out)
 
-    print("\n=== AFTER ORDINAL ENCODING ===")
-    print("ordinal encoded columns created:", ord_out.shape[1])
-    print("columns added:", out.shape[1] - cols_before)
-    print("out rows, cols:", out.shape)
+    # after ordinal prints removed
 
     # -------------------
     # 4) Mixed (v1): ordinal + (NA/IDK) flags
     # -------------------
-    print("\n=== MIXED v1 (ORDINAL + FLAGS) INPUT FEATURES ===")
+    # mixed v1 input prints removed
 
     mixed_cols = [c for c in MIXED_SPECS.keys() if c in df.columns]
-    print("mixed_cols used:", mixed_cols)
-    print("count mixed original features:", len(mixed_cols))
+    # mixed v1 input prints removed
 
     mixed_out = pd.DataFrame(index=df.index)
 
     for c in mixed_cols:
         spec = MIXED_SPECS[c]
-        print(f"\n- {c}")
-
         raw = df[c].map(norm_str).astype("string")
         obs = sorted(raw.dropna().unique().tolist())
-        print("  observed categories (raw):", obs)
-
-        if spec["collapse_map"]:
-            print("  collapse_map used:", spec["collapse_map"])
-
-        print("  ordinal mapping used:", spec["ord_mapping"])
-        if spec["na_tokens"]:
-            print("  NA tokens:", sorted(list(spec["na_tokens"])))
-        if spec["idk_tokens"]:
-            print("  IDK tokens:", sorted(list(spec["idk_tokens"])))
 
         enc_block = encode_mixed_ord_plus_flags(
             df=df,
@@ -1440,57 +1340,30 @@ def main() -> None:
             drop_all_zero_flags=True,
         )
 
-        print("  encoded columns created:", list(enc_block.columns))
-
-        preview = (
-            pd.concat([raw.rename(c), enc_block], axis=1)
-            .dropna(subset=[c])
-            .drop_duplicates()
-            .head(10)
-        )
-        print("  preview (raw -> encoded):")
-        print(preview)
+        # mixed v1 detail prints removed
 
         mixed_out = mixed_out.join(enc_block)
 
     cols_before = out.shape[1]
     out = out.join(mixed_out)
 
-    print("\n=== AFTER MIXED v1 ENCODING ===")
-    print("mixed v1 encoded columns created:", mixed_out.shape[1])
-    print("columns added:", out.shape[1] - cols_before)
-    print("out rows, cols:", out.shape)
+    # after mixed v1 prints removed
 
     # -------------------
     # 5) Mixed (v2): ordinal + TWO nominal flags (plus optional extra flags)
     #     (inspected separately, as requested)
     # -------------------
-    print("\n=== MIXED v2 (ORDINAL + 2 NOMINAL FLAGS) INPUT FEATURES ===")
+    # mixed v2 input prints removed
 
     mixed_v2_cols = [c for c in MIXED_SPECS_V2.keys() if c in df.columns]
-    print("mixed_v2_cols used:", mixed_v2_cols)
-    print("count mixed v2 original features:", len(mixed_v2_cols))
+    # mixed v2 input prints removed
 
     mixed_v2_out = pd.DataFrame(index=df.index)
 
     for c in mixed_v2_cols:
         spec = MIXED_SPECS_V2[c]
-        print(f"\n- {c}")
-
         raw = df[c].map(norm_str).astype("string")
         obs = sorted(raw.dropna().unique().tolist())
-        print("  observed categories (raw):", obs)
-
-        if spec.get("collapse_map"):
-            print("  collapse_map used:", spec["collapse_map"])
-
-        print("  ordinal mapping used:", spec["ord_mapping"])
-        if spec.get("na_tokens"):
-            print("  NA tokens:", sorted(list(spec["na_tokens"])))
-        if spec.get("idk_tokens"):
-            print("  IDK tokens:", sorted(list(spec["idk_tokens"])))
-        if spec.get("extra_flag_tokens"):
-            print("  extra flag tokens:", spec["extra_flag_tokens"])
 
         enc_block = encode_mixed_ord_plus_flags_v2(
             df=df,
@@ -1503,126 +1376,14 @@ def main() -> None:
             drop_all_zero_flags=True,
         )
 
-        print("  encoded columns created:", list(enc_block.columns))
-
-        preview = (
-            pd.concat([raw.rename(c), enc_block], axis=1)
-            .dropna(subset=[c])
-            .drop_duplicates()
-            .head(10)
-        )
-        print("  preview (raw -> encoded):")
-        print(preview)
+        # mixed v2 detail prints removed
 
         mixed_v2_out = mixed_v2_out.join(enc_block)
 
     cols_before = out.shape[1]
     out = out.join(mixed_v2_out)
 
-    print("\n=== AFTER MIXED v2 ENCODING ===")
-    print("mixed v2 encoded columns created:", mixed_v2_out.shape[1])
-    print("columns added:", out.shape[1] - cols_before)
-    print("out rows, cols:", out.shape)
-
-    # ==========================================================
-    # MISSINGNESS SUMMARY (encoded columns)
-    # ==========================================================
-    print("\n=== MISSINGNESS SUMMARY (ENCODED) ===")
-
-    def prevalence_label(pct: float) -> str:
-        # Use simple bins; edit thresholds if you want
-        if pct < 5:
-            return "rare"
-        elif pct < 30:
-            return "moderate"
-        else:
-            return "dominant"
-
-    def informativeness_label(observed_pct: float, dominant_share_pct: float) -> str:
-        # observed_pct is % non-NaN for _ord columns
-        if observed_pct < 20:
-            return "mostly unknown"
-        if dominant_share_pct >= 95:
-            return "uninformative (almost constant)"
-        if dominant_share_pct >= 80:
-            return "weak signal (very skewed)"
-        return "informative"
-
-    n = len(out)
-
-    # --------------------------
-    # 1) _ord columns: %NaN + dominance among observed
-    # --------------------------
-    ord_cols = [c for c in out.columns if c.endswith("_ord")]
-    ord_rows = []
-
-    for c in ord_cols:
-        s = out[c]
-        pct_nan = (s.isna().sum() / n) * 100
-        observed = s.dropna()
-
-        if len(observed) == 0:
-            dominant_share = 100.0
-            observed_pct = 0.0
-        else:
-            dominant_share = (observed.value_counts().iloc[0] / len(observed)) * 100
-            observed_pct = 100.0 - pct_nan
-
-        ord_rows.append({
-            "feature": c,
-            "%NaN": round(pct_nan, 2),
-            "NaN_level": prevalence_label(pct_nan),
-            "dominant_share_observed_%": round(dominant_share, 2),
-            "informativeness": informativeness_label(observed_pct, dominant_share),
-        })
-
-    ord_summary = pd.DataFrame(ord_rows).sort_values("%NaN", ascending=False)
-    if ord_summary.empty:
-        print("No _ord columns found.")
-    else:
-        print("\n--- _ord columns (NaN + informativeness) ---")
-        print(ord_summary.to_string(index=False))
-
-    # --------------------------
-    # 2) Flag columns: frequency of 1s
-    # --------------------------
-    flag_cols = [c for c in out.columns if ("__na" in c) or ("__idk" in c) or ("__no_response" in c)]
-    flag_rows = []
-
-    for c in flag_cols:
-        s = pd.to_numeric(out[c], errors="coerce").fillna(0)
-        pct_one = (s.sum() / n) * 100
-        flag_rows.append({
-            "feature": c,
-            "%==1": round(pct_one, 2),
-            "flag_level": prevalence_label(pct_one),
-        })
-
-    flag_summary = pd.DataFrame(flag_rows).sort_values("%==1", ascending=False)
-    if flag_summary.empty:
-        print("\nNo flag columns (__na/__idk/__no_response) found.")
-    else:
-        print("\n--- Flag columns (prevalence of special tokens) ---")
-        print(flag_summary.to_string(index=False))
-    print("\n=== QUICK CHECK ===")
-    ord_cols = [c for c in out.columns if c.endswith("_ord")]
-    if ord_cols:
-        pct_nan = (out[ord_cols].isna().mean() * 100).round(2).sort_values(ascending=False)
-        print("\n% NaN per _ord column:")
-        print(pct_nan)
-
-    flag_cols = [c for c in out.columns if ("__na" in c) or ("__idk" in c) or ("__no_response" in c)]
-    if flag_cols:
-        pct_one = (out[flag_cols].mean() * 100).round(2).sort_values(ascending=False)
-        print("\n% == 1 per flag column:")
-        print(pct_one)
-
-
-
-    # ===== FINAL SHAPE =====
-    print("\n=== FINAL ENCODED MATRIX ===")
-    print("out rows, cols:", out.shape)
-    print("encoded features (excluding respondent_id):", out.shape[1] - 1)
+    # after mixed v2 prints removed
 
     # ----------------------------------------------------------
     # DROP LOW-INFORMATION FLAG COLUMNS
@@ -1634,611 +1395,10 @@ def main() -> None:
     drop_present = [c for c in drop_cols if c in out.columns]
     if drop_present:
         out = out.drop(columns=drop_present)
-        print("\nDropped low-information encoded columns:", drop_present)
-
-    # ==========================================================
-    # FEATURE DISTRIBUTIONS / VARIANCE CHECKS (pre-correlation)
-    # ==========================================================
-    print("\n=== FEATURE DISTRIBUTIONS / VARIANCE CHECKS ===")
-
-    n = len(out)
-
-    # --------------------------
-    # Helper labels
-    # --------------------------
-    def rarity_label(pct: float) -> str:
-        if pct < 0.5:
-            return "extremely rare"
-        elif pct < 2:
-            return "very rare"
-        elif pct < 10:
-            return "rare"
-        else:
-            return "common"
-
-    def near_constant_label(dominant_pct: float) -> str:
-        if dominant_pct >= 99:
-            return "near-constant (>=99%)"
-        elif dominant_pct >= 95:
-            return "highly imbalanced (>=95%)"
-        elif dominant_pct >= 90:
-            return "imbalanced (>=90%)"
-        else:
-            return "ok"
-
-    # ==========================================================
-    # 1) Binary flags (0/1): imbalance check
-    #    This includes __na, __idk, __no_response and original binaries
-    # ==========================================================
-    print("\n--- Binary/flag features: imbalance ---")
-
-    # candidate binary columns: those that look like flags OR are strictly {0,1}
-    candidate_bin = [c for c in out.columns if c != "respondent_id"]
-    bin_rows = []
-
-    for c in candidate_bin:
-        s = out[c]
-
-        # only consider numeric columns for binary test
-        s_num = pd.to_numeric(s, errors="coerce")
-        if s_num.isna().all():
-            continue
-
-        vals = set(pd.unique(s_num.dropna()))
-        if not vals.issubset({0, 1}):
-            continue
-
-        ones = float(s_num.fillna(0).sum())
-        pct_one = (ones / n) * 100
-        pct_zero = 100 - pct_one
-        dominant = max(pct_one, pct_zero)
-
-        bin_rows.append({
-            "feature": c,
-            "%1": round(pct_one, 2),
-            "%0": round(pct_zero, 2),
-            "dominant_%": round(dominant, 2),
-            "imbalance": near_constant_label(dominant),
-        })
-
-    bin_df = pd.DataFrame(bin_rows).sort_values("dominant_%", ascending=False).reset_index(drop=True)
-    if bin_df.empty:
-        print("No binary/flag columns detected.")
-    else:
-        print(bin_df.head(50).to_string(index=False))
-
-        # list worst offenders
-        worst_bin = bin_df[bin_df["dominant_%"] >= 99]
-        if not worst_bin.empty:
-            print("\nBinary near-constant (>=99% one value):")
-            print(worst_bin[["feature", "%1", "%0", "dominant_%"]].to_string(index=False))
-
-    # ==========================================================
-    # 2) Ordinal columns (_ord): spread across allowed range
-    # ==========================================================
-    print("\n--- Ordinal features (_ord): spread / coverage ---")
-
-    ord_cols = [c for c in out.columns if c.endswith("_ord")]
-    ord_rows = []
-
-    for c in ord_cols:
-        s = out[c]
-        observed = s.dropna()
-        if len(observed) == 0:
-            ord_rows.append({
-                "feature": c,
-                "n_obs": 0,
-                "n_unique": 0,
-                "min": None,
-                "max": None,
-                "range": None,
-                "dominant_share_%": None,
-                "spread_flag": "NO DATA",
-            })
-            continue
-
-        vc = observed.value_counts()
-        dominant_share = (vc.iloc[0] / len(observed)) * 100
-        vmin = float(observed.min())
-        vmax = float(observed.max())
-        vrange = vmax - vmin
-        n_unique = int(observed.nunique())
-
-        # heuristic: bad if only 1 unique or dominant share huge
-        if n_unique <= 1:
-            spread_flag = "near-constant"
-        elif dominant_share >= 95:
-            spread_flag = "very skewed"
-        else:
-            spread_flag = "ok"
-
-        ord_rows.append({
-            "feature": c,
-            "n_obs": int(len(observed)),
-            "n_unique": n_unique,
-            "min": vmin,
-            "max": vmax,
-            "range": vrange,
-            "dominant_share_%": round(dominant_share, 2),
-            "spread_flag": spread_flag,
-        })
-
-    ord_df = pd.DataFrame(ord_rows).sort_values(
-        ["spread_flag", "dominant_share_%"],
-        ascending=[True, False]
-    ).reset_index(drop=True)
-
-    if ord_df.empty:
-        print("No _ord columns found.")
-    else:
-        # show the most suspicious first
-        print(ord_df.sort_values(["spread_flag", "dominant_share_%"], ascending=[True, False]).head(50).to_string(index=False))
-
-        suspicious_ord = ord_df[(ord_df["spread_flag"] != "ok")]
-        if not suspicious_ord.empty:
-            print("\nOrdinal features flagged as near-constant / very skewed:")
-            print(suspicious_ord[["feature", "n_unique", "min", "max", "dominant_share_%", "spread_flag"]].to_string(index=False))
-
-    # ==========================================================
-    # 3) One-hot nominal columns: rare category detection
-    #    We detect one-hots by: column contains '=' and values are {0,1}
-    # ==========================================================
-    print("\n--- One-hot nominal features: rare categories ---")
-
-    onehot_cols = [c for c in out.columns if ("=" in c) and (c != "respondent_id")]
-    oh_rows = []
-
-    for c in onehot_cols:
-        s = pd.to_numeric(out[c], errors="coerce").fillna(0)
-        vals = set(pd.unique(s))
-        if not vals.issubset({0, 1}):
-            continue
-
-        count_one = int(s.sum())
-        pct_one = (count_one / n) * 100
-
-        oh_rows.append({
-            "feature": c,
-            "count_1": count_one,
-            "%1": round(pct_one, 3),
-            "rarity": rarity_label(pct_one),
-        })
-
-    oh_df = pd.DataFrame(oh_rows).sort_values("%1", ascending=True).reset_index(drop=True)
-    if oh_df.empty:
-        print("No one-hot columns detected (with '=' in name).")
-    else:
-        print("\nMost rare one-hot categories (top 50 rarest):")
-        print(oh_df.head(50).to_string(index=False))
-
-        extreme = oh_df[oh_df["%1"] < 0.5]
-        if not extreme.empty:
-            print("\nExtremely rare one-hot categories (<0.5%):")
-            print(extreme.to_string(index=False))
-
-    # ==========================================================
-    # CORRELATION / REDUNDANCY ANALYSIS (STRUCTURED, NO MIXING)
-    # ==========================================================
-    print("\n=== CORRELATION / REDUNDANCY ANALYSIS ===")
-
-    from scipy.stats import spearmanr
-
-    # ----------------------------------------------------------
-    # Helper: report correlations in tiers (more informative than one cutoff)
-    # ----------------------------------------------------------
-    STRONG_T = 0.8
-    MODERATE_T = 0.6
-
-    def report_tiered_corr(df_corr: pd.DataFrame, label: str) -> None:
-        rows = []
-        cols = list(df_corr.columns)
-
-        for i in range(len(cols)):
-            for j in range(i + 1, len(cols)):
-                val = df_corr.iloc[i, j]
-                if pd.isna(val):
-                    continue
-
-                a = abs(val)
-                if a >= STRONG_T:
-                    level = f"STRONG (>= {STRONG_T})"
-                elif a >= MODERATE_T:
-                    level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-                else:
-                    continue
-
-                rows.append({
-                    "feature_1": cols[i],
-                    "feature_2": cols[j],
-                    "corr": round(float(val), 3),
-                    "level": level,
-                })
-
-        if not rows:
-            print(f"\n--- {label}: no pairs with |corr| >= {MODERATE_T} ---")
-            return
-
-        out_df = pd.DataFrame(rows)
-
-        # Sort: show STRONG first, then by absolute correlation
-        out_df["abs_corr"] = out_df["corr"].abs()
-        out_df["level_rank"] = out_df["level"].str.startswith("STRONG").map({True: 0, False: 1})
-        out_df = out_df.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-            columns=["abs_corr", "level_rank"]
-        )
-
-        print(f"\n--- {label}: |corr| >= {MODERATE_T} (tiered) ---")
-        print(out_df.to_string(index=False))
-
-    # ==========================================================
-    # 1) ORDINAL ↔ ORDINAL (Spearman)
-    # ==========================================================
-    print("\n[1] Ordinal ↔ Ordinal (Spearman)")
-
-    ord_cols = [c for c in out.columns if c.endswith("_ord")]
-    if len(ord_cols) >= 2:
-        ord_df = out[ord_cols]
-        corr_ord = ord_df.corr(method="spearman")
-        report_tiered_corr(corr_ord, "Ordinal–Ordinal")
-    else:
-        print("Not enough ordinal columns to compute correlations.")
-
-    # ==========================================================
-    # 2) BINARY ↔ BINARY (phi / Pearson on {0,1})
-    #    Includes flags (__na, __idk, etc.) and true binaries
-    # ==========================================================
-    print("\n[2] Binary ↔ Binary (phi / Pearson)")
-
-    bin_cols = []
-    for c in out.columns:
-        if c == "respondent_id":
-            continue
-        s = pd.to_numeric(out[c], errors="coerce")
-        # require fully observed 0/1 for this audit
-        if s.notna().all() and set(s.unique()).issubset({0, 1}):
-            bin_cols.append(c)
-
-    if len(bin_cols) >= 2:
-        bin_df = out[bin_cols]
-        corr_bin = bin_df.corr(method="pearson")
-        report_tiered_corr(corr_bin, "Binary–Binary")
-    else:
-        print("Not enough binary columns to compute correlations.")
-
-    # ==========================================================
-    # 3) ORDINAL ↔ BINARY (Spearman)
-    #    NOTE: high corr with __na flags is often STRUCTURAL (expected)
-    # ==========================================================
-    print("\n[3] Ordinal ↔ Binary (Spearman)")
-
-    ord_bin_pairs = []
-    for o in ord_cols:
-        o_s = out[o]
-        for b in bin_cols:
-            b_s = out[b]
-
-            # only rows where ordinal is observed
-            mask = o_s.notna()
-            if int(mask.sum()) < 30:
-                continue
-
-            o_vals = o_s[mask]
-            b_vals = b_s[mask]
-
-            # skip if either side has no variance (correlation undefined)
-            if int(o_vals.nunique()) <= 1:
-                continue
-            if int(b_vals.nunique()) <= 1:
-                continue
-
-            corr, _ = spearmanr(o_vals, b_vals)
-            if pd.isna(corr):
-                continue
-
-            a = abs(corr)
-            if a >= STRONG_T:
-                level = f"STRONG (>= {STRONG_T})"
-            elif a >= MODERATE_T:
-                level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-            else:
-                continue
-
-            ord_bin_pairs.append({
-                "ordinal": o,
-                "binary": b,
-                "corr": round(float(corr), 3),
-                "level": level,
-            })
-
-    if ord_bin_pairs:
-        df_pairs = pd.DataFrame(ord_bin_pairs)
-        df_pairs["abs_corr"] = df_pairs["corr"].abs()
-        df_pairs["level_rank"] = df_pairs["level"].str.startswith("STRONG").map({True: 0, False: 1})
-        df_pairs = df_pairs.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-            columns=["abs_corr", "level_rank"]
-        )
-
-        print(f"\n--- Ordinal–Binary pairs with |corr| >= {MODERATE_T} (tiered) ---")
-        print(df_pairs.to_string(index=False))
-        print("\nNOTE: correlations with __na flags are often STRUCTURAL, not redundancy.")
-    else:
-        print(f"No ordinal–binary correlations with |corr| >= {MODERATE_T} detected.")
-
-    # ==========================================================
-    # 4) ONE-HOT NOMINAL GROUPS (within same original feature)
-    #    Correlation within a one-hot group is often structural;
-    #    we still report strong/moderate pairs for inspection.
-    # ==========================================================
-    print("\n[4] One-hot nominal groups (within-feature redundancy)")
-
-    onehot_cols = [c for c in out.columns if "=" in c]
-    groups = {}
-    for c in onehot_cols:
-        base = c.split("=", 1)[0]
-        groups.setdefault(base, []).append(c)
-
-    any_group_reported = False
-
-    for base, cols in groups.items():
-        if len(cols) < 2:
-            continue
-
-        df = out[cols]
-        corr = df.corr(method="pearson")
-
-        rows = []
-        for i in range(len(cols)):
-            for j in range(i + 1, len(cols)):
-                val = corr.iloc[i, j]
-                if pd.isna(val):
-                    continue
-
-                a = abs(val)
-                if a >= STRONG_T:
-                    level = f"STRONG (>= {STRONG_T})"
-                elif a >= MODERATE_T:
-                    level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-                else:
-                    continue
-
-                rows.append({
-                    "feature_1": cols[i],
-                    "feature_2": cols[j],
-                    "corr": round(float(val), 3),
-                    "level": level,
-                })
-
-        if rows:
-            any_group_reported = True
-            out_df = pd.DataFrame(rows)
-            out_df["abs_corr"] = out_df["corr"].abs()
-            out_df["level_rank"] = out_df["level"].str.startswith("STRONG").map({True: 0, False: 1})
-            out_df = out_df.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-                columns=["abs_corr", "level_rank"]
-            )
-
-            print(f"\nNominal group '{base}': correlations >= {MODERATE_T}")
-            print(out_df.to_string(index=False))
-
-    if not any_group_reported:
-        print(f"No within-group one-hot correlations with |corr| >= {MODERATE_T} detected.")
-
-
-    # ==========================================================
-    # CORRELATION / REDUNDANCY ANALYSIS (STRUCTURED, NO MIXING)
-    # ==========================================================
-    print("\n=== CORRELATION / REDUNDANCY ANALYSIS ===")
-
-    from scipy.stats import spearmanr
-
-    # ----------------------------------------------------------
-    # Helper: report correlations in tiers (more informative than one cutoff)
-    # ----------------------------------------------------------
-    STRONG_T = 0.8
-    MODERATE_T = 0.6
-
-    def report_tiered_corr(df_corr: pd.DataFrame, label: str) -> None:
-        rows = []
-        cols = list(df_corr.columns)
-
-        for i in range(len(cols)):
-            for j in range(i + 1, len(cols)):
-                val = df_corr.iloc[i, j]
-                if pd.isna(val):
-                    continue
-
-                a = abs(val)
-                if a >= STRONG_T:
-                    level = f"STRONG (>= {STRONG_T})"
-                elif a >= MODERATE_T:
-                    level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-                else:
-                    continue
-
-                rows.append({
-                    "feature_1": cols[i],
-                    "feature_2": cols[j],
-                    "corr": round(float(val), 3),
-                    "level": level,
-                })
-
-        if not rows:
-            print(f"\n--- {label}: no pairs with |corr| >= {MODERATE_T} ---")
-            return
-
-        out_df = pd.DataFrame(rows)
-
-        # Sort: show STRONG first, then by absolute correlation
-        out_df["abs_corr"] = out_df["corr"].abs()
-        out_df["level_rank"] = out_df["level"].str.startswith("STRONG").map({True: 0, False: 1})
-        out_df = out_df.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-            columns=["abs_corr", "level_rank"]
-        )
-
-        print(f"\n--- {label}: |corr| >= {MODERATE_T} (tiered) ---")
-        print(out_df.to_string(index=False))
-
-    # ==========================================================
-    # 1) ORDINAL ↔ ORDINAL (Spearman)
-    # ==========================================================
-    print("\n[1] Ordinal ↔ Ordinal (Spearman)")
-
-    ord_cols = [c for c in out.columns if c.endswith("_ord")]
-    if len(ord_cols) >= 2:
-        ord_df = out[ord_cols]
-        corr_ord = ord_df.corr(method="spearman")
-        report_tiered_corr(corr_ord, "Ordinal–Ordinal")
-    else:
-        print("Not enough ordinal columns to compute correlations.")
-
-    # ==========================================================
-    # 2) BINARY ↔ BINARY (phi / Pearson on {0,1})
-    #    Includes flags (__na, __idk, etc.) and true binaries
-    # ==========================================================
-    print("\n[2] Binary ↔ Binary (phi / Pearson)")
-
-    bin_cols = []
-    for c in out.columns:
-        if c == "respondent_id":
-            continue
-        s = pd.to_numeric(out[c], errors="coerce")
-        # require fully observed 0/1 for this audit
-        if s.notna().all() and set(s.unique()).issubset({0, 1}):
-            bin_cols.append(c)
-
-    if len(bin_cols) >= 2:
-        bin_df = out[bin_cols]
-        corr_bin = bin_df.corr(method="pearson")
-        report_tiered_corr(corr_bin, "Binary–Binary")
-    else:
-        print("Not enough binary columns to compute correlations.")
-
-    # ==========================================================
-    # 3) ORDINAL ↔ BINARY (Spearman)
-    #    NOTE: high corr with __na flags is often STRUCTURAL (expected)
-    # ==========================================================
-    print("\n[3] Ordinal ↔ Binary (Spearman)")
-
-    ord_bin_pairs = []
-    for o in ord_cols:
-        o_s = out[o]
-        for b in bin_cols:
-            b_s = out[b]
-
-            # only rows where ordinal is observed
-            mask = o_s.notna()
-            if int(mask.sum()) < 30:
-                continue
-
-            o_vals = o_s[mask]
-            b_vals = b_s[mask]
-
-            # skip if either side has no variance (correlation undefined)
-            if int(o_vals.nunique()) <= 1:
-                continue
-            if int(b_vals.nunique()) <= 1:
-                continue
-
-            corr, _ = spearmanr(o_vals, b_vals)
-            if pd.isna(corr):
-                continue
-
-            a = abs(corr)
-            if a >= STRONG_T:
-                level = f"STRONG (>= {STRONG_T})"
-            elif a >= MODERATE_T:
-                level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-            else:
-                continue
-
-            ord_bin_pairs.append({
-                "ordinal": o,
-                "binary": b,
-                "corr": round(float(corr), 3),
-                "level": level,
-            })
-
-    if ord_bin_pairs:
-        df_pairs = pd.DataFrame(ord_bin_pairs)
-        df_pairs["abs_corr"] = df_pairs["corr"].abs()
-        df_pairs["level_rank"] = df_pairs["level"].str.startswith("STRONG").map({True: 0, False: 1})
-        df_pairs = df_pairs.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-            columns=["abs_corr", "level_rank"]
-        )
-
-        print(f"\n--- Ordinal–Binary pairs with |corr| >= {MODERATE_T} (tiered) ---")
-        print(df_pairs.to_string(index=False))
-        print("\nNOTE: correlations with __na flags are often STRUCTURAL, not redundancy.")
-    else:
-        print(f"No ordinal–binary correlations with |corr| >= {MODERATE_T} detected.")
-
-    # ==========================================================
-    # 4) ONE-HOT NOMINAL GROUPS (within same original feature)
-    #    Correlation within a one-hot group is often structural;
-    #    we still report strong/moderate pairs for inspection.
-    # ==========================================================
-    print("\n[4] One-hot nominal groups (within-feature redundancy)")
-
-    onehot_cols = [c for c in out.columns if "=" in c]
-    groups = {}
-    for c in onehot_cols:
-        base = c.split("=", 1)[0]
-        groups.setdefault(base, []).append(c)
-
-    any_group_reported = False
-
-    for base, cols in groups.items():
-        if len(cols) < 2:
-            continue
-
-        df = out[cols]
-        corr = df.corr(method="pearson")
-
-        rows = []
-        for i in range(len(cols)):
-            for j in range(i + 1, len(cols)):
-                val = corr.iloc[i, j]
-                if pd.isna(val):
-                    continue
-
-                a = abs(val)
-                if a >= STRONG_T:
-                    level = f"STRONG (>= {STRONG_T})"
-                elif a >= MODERATE_T:
-                    level = f"MODERATE ({MODERATE_T}–{STRONG_T})"
-                else:
-                    continue
-
-                rows.append({
-                    "feature_1": cols[i],
-                    "feature_2": cols[j],
-                    "corr": round(float(val), 3),
-                    "level": level,
-                })
-
-        if rows:
-            any_group_reported = True
-            out_df = pd.DataFrame(rows)
-            out_df["abs_corr"] = out_df["corr"].abs()
-            out_df["level_rank"] = out_df["level"].str.startswith("STRONG").map({True: 0, False: 1})
-            out_df = out_df.sort_values(["level_rank", "abs_corr"], ascending=[True, False]).drop(
-                columns=["abs_corr", "level_rank"]
-            )
-
-            print(f"\nNominal group '{base}': correlations >= {MODERATE_T}")
-            print(out_df.to_string(index=False))
-
-    if not any_group_reported:
-        print(f"No within-group one-hot correlations with |corr| >= {MODERATE_T} detected.")
-
     # ==========================================================
     # DROP redundant previous-employment __na flags (explicit list)
     # KEEP prev_boss as the single applicability indicator
     # ==========================================================
-    print("\n=== DROPPING REDUNDANT PREVIOUS-EMPLOYMENT __na FLAGS (EXPLICIT) ===")
-
-    shape_before = out.shape
-    n_features_before = out.shape[1] - 1  # exclude respondent_id
 
     # Explicit list of structurally identical NA flags tied to prev_boss
     prev_employment_na_cols = [
@@ -2259,91 +1419,21 @@ def main() -> None:
     drop_cols = [c for c in prev_employment_na_cols if c in out.columns]
     out = out.drop(columns=drop_cols)
 
-    shape_after = out.shape
-    n_features_after = out.shape[1] - 1
-
-    print(f"Shape: {shape_before} -> {shape_after}")
-    print(f"Encoded features (excluding respondent_id): {n_features_before} -> {n_features_after}")
-    print(f"Dropped {len(drop_cols)} previous-employment __na flags:")
-    for c in drop_cols:
-        print(" -", c)
-
-    print(f"Remaining columns: {out.shape[1]} (including respondent_id)")
-
     # ==========================================================
     # NORMALIZE BINARY FEATURES TO 0/1 INTEGERS
     # (eliminate True/False everywhere)
     # ==========================================================
-    print("\n=== NORMALIZING BINARY FEATURES TO 0/1 ===")
-
     # identify boolean columns
     bool_cols = out.select_dtypes(include=["bool"]).columns.tolist()
 
     if bool_cols:
         out[bool_cols] = out[bool_cols].astype(int)
-        print(f"Converted {len(bool_cols)} boolean columns to int (0/1).")
-    else:
-        print("No boolean columns found.")
-
-    # sanity check: ensure no True/False remain
-    remaining_bool = out.select_dtypes(include=["bool"]).columns.tolist()
-    if remaining_bool:
-        print("WARNING: Boolean columns still present:")
-        for c in remaining_bool:
-            print(" -", c)
-
-
-    # ==========================================================
-    # FEATURE DOMINANCE TABLE (for conceptual irrelevance review)
-    # ==========================================================
-    print("\n=== FEATURE DOMINANCE TABLE (ALL REMAINING FEATURES) ===")
-
-    feat_cols = [c for c in out.columns if c != "respondent_id"]
-
-    rows = []
-    n = len(out)
-
-    for c in feat_cols:
-        s = out[c]
-
-        vc = s.value_counts(dropna=False)
-
-        dominant_value = vc.index[0]
-        dominant_count = vc.iloc[0]
-        dominant_share = dominant_count / n * 100
-
-        if pd.isna(dominant_value):
-            dominant_value_name = "NaN"
-        else:
-            dominant_value_name = str(dominant_value)
-
-        rows.append({
-            "feature": c,
-            "dominant_value": dominant_value_name,
-            "dominant_share_%": round(dominant_share, 2),
-            "n_unique_values": int(s.nunique(dropna=False)),
-        })
-
-    dominance_df = (
-        pd.DataFrame(rows)
-        .sort_values("dominant_share_%", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    print(f"\nTotal features audited (excluding respondent_id): {len(dominance_df)}")
-    print(dominance_df.to_string(index=False))
-
-    # Save for manual conceptual review
-    dominance_path = PROJECT_ROOT / "data" / "out" / "feature_dominance_table.csv"
-    dominance_df.to_csv(dominance_path, index=False)
-    print("\nSaved feature dominance table to:", dominance_path)
 
 
 
     # DO NOT DELETE BELOW
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(OUT_PATH, index=False)
-    print("\nSaved encoded drivers:", OUT_PATH)
 
 
 
@@ -2462,13 +1552,9 @@ def main(force: bool = False, block_size: int = 256) -> None:
         try:
             meta = json.loads(OUT_META.read_text(encoding="utf-8"))
             if meta.get("input_sha256") == in_hash:
-                print("Gower distance already computed for this exact drivers_encoded.csv.")
-                print("Using cached:", OUT_NPY)
                 return
-            else:
-                print("Found cached Gower, but input hash changed -> recomputing.")
         except Exception:
-            print("Found cached files but metadata unreadable -> recomputing.")
+            pass
 
     df = pd.read_csv(IN_PATH)
     if "respondent_id" in df.columns:
@@ -2528,7 +1614,7 @@ def main(force: bool = False, block_size: int = 256) -> None:
     }
     OUT_META.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    print("Saved:", OUT_NPY)
+    # saved output message removed
     print("Saved metadata:", OUT_META)
 
 
@@ -2719,273 +1805,54 @@ def main() -> None:
     validate_distance_matrix(D)
 
     n = D.shape[0]
-    print(f"Loaded Gower distance matrix: shape={D.shape}")
-    print(f"Distance stats: min={np.min(D):.6f}, max={np.max(D):.6f}, mean={np.mean(D):.6f}")
+    print(
+        f"Gower matrix shape={D.shape}; stats min={np.min(D):.6f}, max={np.max(D):.6f}, mean={np.mean(D):.6f}"
+    )
 
     rows = []
     for k in K_LIST:
-        print(f"\nRunning PAM (k-medoids) for k={k} ...")
         res = run_pam(D, k)
 
-        # Save labels + medoids per k
+        # Save labels per k
         np.save(OUT_DIR / f"pam_labels_k{k}.npy", res["labels"])
-        np.save(OUT_DIR / f"pam_medoids_k{k}.npy", np.array(res["medoid_indices"], dtype=np.int32))
 
         rows.append({kk: vv for kk, vv in res.items() if kk not in ("labels",)})
 
-        print(
-            f"k={k:>2} | sil_avg={res['silhouette_avg']:.4f} | "
-            f"sil_q25/50/75=({res['silhouette_q25']:.4f}, {res['silhouette_q50']:.4f}, {res['silhouette_q75']:.4f}) | "
-            f"sizes={res['cluster_sizes']}"
-        )
-
-    # Save summary table
+    # Summary table (in-memory only; no CSV output)
     df = pd.DataFrame(rows).sort_values("k")
-    out_csv = OUT_DIR / "pam_summary.csv"
-    df.to_csv(out_csv, index=False)
-    print(f"\nSaved summary table: {out_csv}")
-    print(f"Saved per-k labels/medoids in: {OUT_DIR}")
+    df_table = df[["k", "silhouette_avg", "silhouette_q25", "silhouette_q50", "silhouette_q75", "cluster_sizes"]].copy()
+    df_table = df_table.rename(columns={
+        "silhouette_avg": "sil_avg",
+        "silhouette_q25": "sil_q25",
+        "silhouette_q50": "sil_q50",
+        "silhouette_q75": "sil_q75",
+    })
+    df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]] = df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]].round(4)
+    try:
+        from IPython.display import display, HTML
+        display(HTML(df_table.to_html(index=False)))
+    except Exception:
+        pass
 
     # ----------------------------
     # V2 visuals
     # ----------------------------
     sil_plot_path = OUT_DIR / "silhouette_vs_k.png"
     _plot_silhouette_vs_k(df, sil_plot_path)
-    print(f"Saved: {sil_plot_path}")
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=str(sil_plot_path)))
+    except Exception:
+        pass
 
     size_plot_path = OUT_DIR / "cluster_sizes_by_k.png"
     _plot_cluster_sizes_by_k(df, size_plot_path)
-    print(f"Saved: {size_plot_path}")
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=str(size_plot_path)))
+    except Exception:
+        pass
 
-
-
-main()
-
-#% 06 Hierarchical
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.spatial.distance import squareform
-from scipy.cluster.hierarchy import linkage, dendrogram
-
-
-GOWER_PATH = PROJECT_ROOT / "data" / "out" / "drivers_gower.npy"
-OUT_DIR = PROJECT_ROOT / "data" / "out" / "hierarchical"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# ----------------------------
-# Validation / utilities
-# ----------------------------
-def validate_distance_matrix(D: np.ndarray) -> None:
-    if D.ndim != 2 or D.shape[0] != D.shape[1]:
-        raise ValueError(f"Expected square n×n matrix, got shape {D.shape}")
-
-    if not np.isfinite(D).all():
-        bad = int(np.size(D) - np.isfinite(D).sum())
-        raise ValueError(f"Distance matrix has non-finite values (NaN/inf): {bad} entries")
-
-    if not np.allclose(np.diag(D), 0.0, atol=1e-6):
-        raise ValueError("Distance matrix diagonal is not ~0; check saved file.")
-
-    if not np.allclose(D, D.T, atol=1e-6):
-        raise ValueError("Distance matrix is not symmetric; check computation.")
-
-    if np.min(D) < -1e-6:
-        raise ValueError("Distance matrix has negative entries; invalid distances.")
-
-    if np.max(D) > 1.0 + 1e-6:
-        # Gower should be in [0,1], but allow tiny numeric drift.
-        print(
-            f"WARNING: max(D)={np.max(D):.6f} > 1.0. "
-            "If you expected Gower, verify your computation."
-        )
-
-
-def tier_label(abs_corr: float) -> str:
-    if abs_corr >= 0.8:
-        return "STRONG (>= 0.8)"
-    if abs_corr >= 0.6:
-        return "MODERATE (0.6–0.8)"
-    return "weak (< 0.6)"
-
-
-def big_jumps_to_candidate_k(
-    Z: np.ndarray,
-    top_m: int = 12,
-    min_k: int = 2,
-    max_k: int = 30,
-):
-    """
-    Find large increases in linkage distance (merge heights).
-
-    heights has length n-1 where n is #points.
-    diffs[j] = heights[j+1] - heights[j] corresponds to the "jump" into merge (j+1).
-
-    Cutting BEFORE merge (j+1) yields:
-        #clusters = n - (j+1)
-
-    Returns a list of candidate k values with associated jump statistics.
-    """
-    n = Z.shape[0] + 1
-    heights = Z[:, 2]
-    if len(heights) < 2:
-        return []
-
-    diffs = np.diff(heights)  # length n-2
-    idx = np.argsort(diffs)[::-1]  # largest first
-
-    picks = []
-    for j in idx[:top_m]:
-        k = n - (j + 1)
-        if not (min_k <= k <= max_k):
-            continue
-
-        lo = float(heights[j])
-        hi = float(heights[j + 1])
-        jump = float(diffs[j])
-        cut_height = (lo + hi) / 2.0
-
-        picks.append(
-            {
-                "k": int(k),
-                "jump": jump,
-                "cut_between": (lo, hi),
-                "cut_height": float(cut_height),
-                "merge_index": int(j + 1),
-            }
-        )
-
-    # de-duplicate ks while preserving order
-    seen = set()
-    uniq = []
-    for p in picks:
-        if p["k"] not in seen:
-            uniq.append(p)
-            seen.add(p["k"])
-    return uniq
-
-
-def plot_truncated_dendrogram(
-    Z: np.ndarray,
-    title: str,
-    p: int = 30,
-    truncate_mode: str = "lastp",
-    save_path: Path | None = None,
-) -> None:
-    plt.figure(figsize=(12, 6), dpi=150)
-    dendrogram(
-        Z,
-        truncate_mode=truncate_mode,  # "lastp" (default) or "level"
-        p=p,
-        show_leaf_counts=True,
-        leaf_rotation=0,
-        leaf_font_size=10,
-    )
-    plt.title(title)
-    plt.xlabel("Cluster (truncated)")
-    plt.ylabel("Linkage distance (precomputed Gower)")
-    plt.tight_layout()
-
-    if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
-        print(f"Saved dendrogram: {save_path}")
-        plt.close()
-    else:
-        plt.show()
-
-
-def plot_linkage_heights(Z: np.ndarray, title: str, save_path: Path) -> None:
-    """
-    Plot the merge heights (Z[:,2]) across merge steps.
-    Large upward jumps suggest a natural cut just before the jump.
-    """
-    h = Z[:, 2]
-    plt.figure(figsize=(10, 4), dpi=150)
-    plt.plot(h)
-    plt.title(title)
-    plt.xlabel("Merge step")
-    plt.ylabel("Linkage distance")
-    plt.tight_layout()
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close()
-    print(f"Saved linkage heights: {save_path}")
-
-
-# ----------------------------
-# Main
-# ----------------------------
-def main() -> None:
-    if not GOWER_PATH.exists():
-        raise FileNotFoundError(f"Missing: {GOWER_PATH}")
-
-    D = np.load(GOWER_PATH)
-    validate_distance_matrix(D)
-
-    n = D.shape[0]
-    print(f"Loaded distance matrix: shape={D.shape}, dtype={D.dtype}")
-    print(f"min(D)={np.min(D):.6f}, max(D)={np.max(D):.6f}, mean(D)={np.mean(D):.6f}")
-
-    # SciPy linkage expects condensed distances
-    d_condensed = squareform(D, checks=False)
-
-    # Linkage methods to compare
-    methods = ["average", "complete", "single"]
-
-    Zs: dict[str, np.ndarray] = {}
-    for m in methods:
-        print(f"\nComputing linkage: {m}")
-        Zs[m] = linkage(d_condensed, method=m)
-
-    # ---- Dendrograms (truncated for readability) ----
-    print("\n=== DENDROGRAMS (TRUNCATED) ===")
-    for m in methods:
-        out_png = OUT_DIR / f"dendrogram_{m}_trunc30_lastp.png"
-        plot_truncated_dendrogram(
-            Zs[m],
-            title=f"Hierarchical clustering ({m} linkage, truncated)",
-            p=30,
-            truncate_mode="lastp",
-            save_path=out_png,
-        )
-
-        # Optional second view (often clearer branching)
-        out_png2 = OUT_DIR / f"dendrogram_{m}_trunc5_level.png"
-        plot_truncated_dendrogram(
-            Zs[m],
-            title=f"Hierarchical clustering ({m} linkage, level-truncated)",
-            p=5,
-            truncate_mode="level",
-            save_path=out_png2,
-        )
-
-    # ---- Linkage heights plots ----
-    print("\n=== LINKAGE HEIGHTS (MERGE DISTANCES) ===")
-    for m in methods:
-        out_png = OUT_DIR / f"linkage_heights_{m}.png"
-        plot_linkage_heights(Zs[m], title=f"Linkage heights ({m})", save_path=out_png)
-
-    # ---- Identify large linkage jumps & propose candidate k ----
-    print("\n=== LARGE LINKAGE JUMPS (heuristic for candidate k) ===")
-    for m in methods:
-        picks = big_jumps_to_candidate_k(Zs[m], top_m=12, min_k=2, max_k=25)
-
-        print(f"\nMethod: {m}")
-        if not picks:
-            print("  No candidate jumps found in the specified k range.")
-            continue
-
-        # Print top few
-        for p_ in picks[:6]:
-            lo, hi = p_["cut_between"]
-            print(
-                f"  k≈{p_['k']:>2}  jump={p_['jump']:.4f}  "
-                f"cut_height≈{p_['cut_height']:.4f}  "
-                f"between heights [{lo:.4f}, {hi:.4f}]"
-            )
-
-        suggested_ks = [p_["k"] for p_ in picks[:5]]
-        print("  Suggested candidate k values (for PAM follow-up):", suggested_ks)
 
 
 main()
@@ -3120,10 +1987,17 @@ def plot_pcoa_3d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, 
     ax.set_ylabel(ylab)
     ax.set_zlabel(zlab)
     ax.set_title("PCoA (Gower) – k=6 clusters (3D)")
-    ax.legend(markerscale=1.5, frameon=False, loc="best")
+    ax.legend(
+        markerscale=1.5,
+        frameon=False,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
 
-    plt.tight_layout()
-    plt.savefig(save_path, bbox_inches="tight")
+    # Increase right margin and avoid tight bbox cropping
+    fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
+    plt.savefig(save_path)
     plt.close(fig)
 
 
@@ -3142,22 +2016,25 @@ def main() -> None:
         raise ValueError("PCoA returned <2 components; cannot make 2D plot.")
     out2d = OUT_DIR / "pcoa_gower_k6_2d.png"
     plot_pcoa_2d(coords[:, :2], explained[:2], labels, out2d)
-    print(f"Saved: {out2d}")
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=str(out2d)))
+    except Exception:
+        pass
 
     # 3D
     if coords.shape[1] >= 3:
         out3d = OUT_DIR / "pcoa_gower_k6_3d.png"
         plot_pcoa_3d(coords[:, :3], explained[:3], labels, out3d)
-        print(f"Saved: {out3d}")
+        try:
+            from IPython.display import Image, display
+            display(Image(filename=str(out3d)))
+        except Exception:
+            pass
     else:
         print("PCoA returned only 2 positive components; 3D plot skipped.")
 
-    # Quick console summary
-    pct = (explained[: min(3, explained.size)] * 100.0).round(2)
-    print(f"Explained (positive-eigenvalue mass): {pct.tolist()} % for first components")
-
-
-
+    # no extra console summary
 main()
 
 #% 08 Post-Cluster Validate
@@ -3808,6 +2685,13 @@ def make_sankey_global(
     )
     fig.write_html(str(out_html))
 
+    # Always show an inline interactive version in notebook output
+    try:
+        from IPython.display import display, HTML
+        display(HTML(fig.to_html(include_plotlyjs='cdn')))
+    except Exception:
+        pass
+
 
 def main() -> None:
     # NEW: silence the Matplotlib “labels -> tick_labels” deprecation spam
@@ -3822,9 +2706,6 @@ def main() -> None:
         if len(lab) != n:
             raise ValueError(f"Label length mismatch: k={k} has {len(lab)} labels, expected {n}")
 
-    print("\n=== POST-CLUSTER STABILITY (k=4..7) ===")
-    print(f"n respondents: {n}")
-
     # -------------------------
     # ARI table (console + optional save)
     # -------------------------
@@ -3836,12 +2717,13 @@ def main() -> None:
             ari_rows.append({"k1": k1, "k2": k2, "ARI": ari})
 
     ari_df = pd.DataFrame(ari_rows).sort_values(["k1", "k2"]).reset_index(drop=True)
-    print("\n--- ARI between k solutions (agreement; higher = more stable) ---")
-    print(ari_df.to_string(index=False))
+    try:
+        from IPython.display import display, HTML
+        display(HTML(ari_df.to_html(index=False)))
+    except Exception:
+        print(ari_df.to_string(index=False))
 
     # Optional: keep a single CSV artifact (not many files)
-    ari_df.to_csv(OUT_DIR / "robustness_ari.csv", index=False)
-
     # -------------------------
     # Stability summary metrics (adjacent only)
     # -------------------------
@@ -3858,200 +2740,26 @@ def main() -> None:
         stability_rows.append(metrics)
 
     stability_df = pd.DataFrame(stability_rows)
-    # nicer formatting in console
-    print("\n--- Stability summary metrics (adjacent transitions) ---")
     show = stability_df.copy()
-    for c in ["avg_max_row_overlap", "median_max_row_overlap"]:
-        show[c] = show[c].map(lambda x: f"{x:.3f}")
-    show["median_row_entropy"] = show["median_row_entropy"].map(lambda x: f"{x:.3f}")
-    show["effective_num_targets_median"] = show["effective_num_targets_median"].map(lambda x: f"{x:.3f}")
-    show["pct_clusters_split"] = show["pct_clusters_split"].map(lambda x: f"{x:.1f}%")
-    print(show.to_string(index=False))
+    for c in ["avg_max_row_overlap", "median_max_row_overlap", "median_row_entropy", "effective_num_targets_median"]:
+        show[c] = show[c].round(3)
+    show["pct_clusters_split"] = show["pct_clusters_split"].round(1)
+    try:
+        from IPython.display import display, HTML
+        display(HTML(show.to_html(index=False)))
+    except Exception:
+        print(show.to_string(index=False))
 
-    stability_df.to_csv(OUT_DIR / "stability_summary_adjacent.csv", index=False)
-    print(f"\nSaved: {OUT_DIR / 'stability_summary_adjacent.csv'}")
-    print(f"Saved: {OUT_DIR / 'robustness_ari.csv'}")
+    # stability_summary_adjacent.csv output removed by request
+    # Note: robustness_ari.csv output removed by request
 
     # -------------------------
-    # Sankey diagrams (adjacent + global)
+    # Global Sankey only
     # -------------------------
-    for k_from, k_to in zip(KS[:-1], KS[1:]):
-        out_html = OUT_DIR / f"sankey_k{k_from}_to_k{k_to}.html"
-        make_sankey_adjacent(k_from, k_to, label_map[k_from], label_map[k_to], out_html)
-        print(f"Saved: {out_html}")
-
     global_html = OUT_DIR / "sankey_global_k4_k5_k6_k7.html"
     make_sankey_global(KS, label_map, global_html)
-    print(f"Saved: {global_html}")
 
-    # -------------------------
-    # Feature importance heatmaps by type (k=5,6,7)
-    # -------------------------
-    if not GOWER_PATH.exists():
-        raise FileNotFoundError(f"Missing Gower distance matrix: {GOWER_PATH}")
-
-    X, feature_names = load_encoded_drivers()
-    D = np.load(GOWER_PATH)
-
-    # --- DIAGNOSTIC: inspect problematic ordinal feature ---
-    feat = "bad_conseq_mh_prev_boss_ord"
-    if feat in feature_names:
-        j = feature_names.index(feat)
-        col = X[:, j]
-        vals, counts = np.unique(col, return_counts=True)
-        print(f"\nDiagnostic for {feat}:")
-        for v, c in zip(vals, counts):
-            print(f"  value={v}, count={c}")
-    else:
-        print(f"\nFeature {feat} not found in encoded data.")
-    # checking ends
-
-    if D.shape[0] != X.shape[0]:
-        raise ValueError(
-            f"Row mismatch: Gower is {D.shape[0]}x{D.shape[1]}, but encoded X has {X.shape[0]} rows"
-        )
-
-    labels_by_k = {k: label_map[k] for k in FEATURE_IMPORTANCE_KS}
-
-    binary_mask, ordinal_mask = split_feature_types(X, feature_names)
-
-    # Ordinal/non-binary heatmap matrix (IQR-normalized)
-    fi_ord = compute_feature_importance_matrix_ordinal(
-        X=X,
-        feature_names=feature_names,
-        D=D,
-        label_map=labels_by_k,
-        ks=FEATURE_IMPORTANCE_KS,
-        ordinal_mask=ordinal_mask,
-    )
-    fi_ord = fi_ord.sort_values("k5", ascending=False) if not fi_ord.empty and "k5" in fi_ord.columns else fi_ord
-    fi_ord_csv = OUT_DIR / "feature_importance_ordinal_k5_k6_k7.csv"
-    fi_ord.to_csv(fi_ord_csv)
-    print(f"Saved ordinal feature-importance matrix: {fi_ord_csv}")
-
-    # Use a single consistent color scale across k (within ordinal heatmap)
-    if not fi_ord.empty:
-        ord_png = OUT_DIR / "feature_importance_heatmap_ordinal.png"
-        plot_heatmap(
-            mat=fi_ord,
-            save_path=ord_png,
-            title="Feature importance (ordinal/non-binary): medoid separation normalized by IQR",
-            colorbar_label="Mean pairwise medoid |Δ| / IQR",
-        )
-        print(f"Saved ordinal feature-importance heatmap: {ord_png}")
-    else:
-        print("Ordinal/non-binary heatmap skipped: no ordinal/non-binary features detected.")
-
-    # Binary heatmap matrix (no IQR normalization; includes rare one-hot features)
-    fi_bin = compute_feature_importance_matrix_binary(
-        X=X,
-        feature_names=feature_names,
-        D=D,
-        label_map=labels_by_k,
-        ks=FEATURE_IMPORTANCE_KS,
-        binary_mask=binary_mask,
-    )
-    fi_bin = fi_bin.sort_values("k5", ascending=False) if not fi_bin.empty and "k5" in fi_bin.columns else fi_bin
-    fi_bin_csv = OUT_DIR / "feature_importance_binary_k5_k6_k7.csv"
-    fi_bin.to_csv(fi_bin_csv)
-    print(f"Saved binary feature-importance matrix: {fi_bin_csv}")
-
-    # Fixed scale [0,1] across k for binary heatmap
-    if not fi_bin.empty:
-        bin_png = OUT_DIR / "feature_importance_heatmap_binary.png"
-        plot_heatmap(
-            mat=fi_bin,
-            save_path=bin_png,
-            title="Feature importance (binary): medoid separation (includes rare features)",
-            colorbar_label="Mean pairwise medoid |Δ| (binary; scale 0..1)",
-            vmin=0.0,
-            vmax=1.0,
-        )
-        print(f"Saved binary feature-importance heatmap: {bin_png}")
-    else:
-        print("Binary heatmap skipped: no binary features detected.")
-
-    # -------------------------
-    # NEW: Combined distribution panels (top N from k=5 ranking)
-    # -------------------------
-    if not fi_ord.empty:
-        top_ord_feats = (
-            fi_ord["k5"].dropna().sort_values(ascending=False).head(TOP_PANEL_N).index.tolist()
-            if "k5" in fi_ord.columns else fi_ord.index.tolist()[:TOP_PANEL_N]
-        )
-        out_panel_ord = OUT_DIR / "panel_distributions_ordinal_top10_k5_k6_k7.png"
-        plot_panel_ordinal_boxplots_by_k(
-            X=X,
-            feature_names=feature_names,
-            label_map=labels_by_k,
-            ks=FEATURE_IMPORTANCE_KS,
-            features=top_ord_feats,
-            save_path=out_panel_ord,
-        )
-        print(f"Saved combined ordinal distribution panel: {out_panel_ord}")
-    else:
-        print("Ordinal distribution panel skipped: no ordinal features detected.")
-
-    if not fi_bin.empty:
-        top_bin_feats = (
-            fi_bin["k5"].dropna().sort_values(ascending=False).head(TOP_PANEL_N).index.tolist()
-            if "k5" in fi_bin.columns else fi_bin.index.tolist()[:TOP_PANEL_N]
-        )
-        out_panel_bin = OUT_DIR / "panel_distributions_binary_top10_k5_k6_k7.png"
-        plot_panel_binary_bars_by_k(
-            X=X,
-            feature_names=feature_names,
-            label_map=labels_by_k,
-            ks=FEATURE_IMPORTANCE_KS,
-            features=top_bin_feats,
-            save_path=out_panel_bin,
-        )
-        print(f"Saved combined binary distribution panel: {out_panel_bin}")
-    else:
-        print("Binary distribution panel skipped: no binary features detected.")
-
-    # -------------------------
-    # NEW (additional): Combined distribution panels (top N from k=6 ranking)
-    # -------------------------
-    if not fi_ord.empty:
-        top_ord_feats_k6 = (
-            fi_ord["k6"].dropna().sort_values(ascending=False).head(TOP_PANEL_N).index.tolist()
-            if "k6" in fi_ord.columns else fi_ord.index.tolist()[:TOP_PANEL_N]
-        )
-        out_panel_ord_k6 = OUT_DIR / "panel_distributions_ordinal_top10_by_k6_k5_k6_k7.png"
-        plot_panel_ordinal_boxplots_by_k(
-            X=X,
-            feature_names=feature_names,
-            label_map=labels_by_k,
-            ks=FEATURE_IMPORTANCE_KS,
-            features=top_ord_feats_k6,
-            save_path=out_panel_ord_k6,
-        )
-        print(f"Saved combined ordinal distribution panel (features chosen by k6): {out_panel_ord_k6}")
-    else:
-        print("Ordinal distribution panel (k6-selected) skipped: no ordinal features detected.")
-
-    if not fi_bin.empty:
-        top_bin_feats_k6 = (
-            fi_bin["k6"].dropna().sort_values(ascending=False).head(TOP_PANEL_N).index.tolist()
-            if "k6" in fi_bin.columns else fi_bin.index.tolist()[:TOP_PANEL_N]
-        )
-        out_panel_bin_k6 = OUT_DIR / "panel_distributions_binary_top10_by_k6_k5_k6_k7.png"
-        plot_panel_binary_bars_by_k(
-            X=X,
-            feature_names=feature_names,
-            label_map=labels_by_k,
-            ks=FEATURE_IMPORTANCE_KS,
-            features=top_bin_feats_k6,
-            save_path=out_panel_bin_k6,
-        )
-        print(f"Saved combined binary distribution panel (features chosen by k6): {out_panel_bin_k6}")
-    else:
-        print("Binary distribution panel (k6-selected) skipped: no binary features detected.")
-
-
-
-
+    # Feature-importance outputs and distribution panels removed as requested.
 main()
 
 #% 09 K6 Inspect
@@ -4184,25 +2892,10 @@ def _print_cluster_label_pct(df, labels, cluster_id, feature_candidates, label_t
 # NEW SECTION: PAIRWISE MEDOID DIFFERENCE HEATMAPS
 # ============================================================
 
-def compute_cluster_medoids(df, labels):
-    medoids = {}
-    for k in sorted(np.unique(labels)):
-        medoids[k] = df[labels == k].median()
-    return pd.DataFrame(medoids).T
+def plot_heatmap(data, title, path, vmax=None, max_rows: Optional[int] = 30):
 
-
-def compute_pairwise_differences(medoids_df):
-    pairs = list(itertools.combinations(medoids_df.index, 2))
-    out = pd.DataFrame(index=medoids_df.columns)
-    for a, b in pairs:
-        out[f"C{a}-C{b}"] = (medoids_df.loc[a] - medoids_df.loc[b]).abs()
-    return out
-
-
-def plot_heatmap(data, title, path, vmax=None):
-
-    if data.shape[0] > 30:
-        data = data.loc[data.max(axis=1).sort_values(ascending=False).head(30).index]
+    if max_rows is not None and data.shape[0] > max_rows:
+        data = data.loc[data.max(axis=1).sort_values(ascending=False).head(max_rows).index]
 
     plt.figure(figsize=(10, max(6, len(data) * 0.35)))
     sns.heatmap(data, cmap="viridis", vmax=vmax)
@@ -4212,45 +2905,51 @@ def plot_heatmap(data, title, path, vmax=None):
     plt.close()
 
 
-def run_pairwise_heatmaps(df, labels):
+def _build_raw_pairwise_diff_matrix(
+    df_raw: pd.DataFrame,
+    labels_aligned: np.ndarray,
+    drop_missing: bool = False,
+) -> pd.DataFrame:
+    """
+    Build pairwise absolute differences of answer proportions for raw features.
+    Rows: feature=answer, Columns: C{i}-C{j} for all cluster pairs.
+    """
+    features = [c for c in df_raw.columns if c != "respondent_id"]
+    clusters = sorted(np.unique(labels_aligned).tolist())
+    pairs = list(itertools.combinations(clusters, 2))
 
-    medoids = compute_cluster_medoids(df, labels)
+    # normalize to string with NA tokens
+    df_norm = df_raw[features].copy()
+    for col in features:
+        s = df_norm[col].astype(object)
+        s[pd.isna(s)] = "NA"
+        df_norm[col] = s.astype(str).str.strip().replace({"": "NA"})
 
-    ordinal_cols = [c for c in df.columns if c.endswith("_ord")]
-    binary_cols = [c for c in df.columns if c not in ordinal_cols]
+    rows = []
+    for feat in features:
+        s_all = df_norm[feat]
+        if drop_missing:
+            mask = ~s_all.isin(["NA", "Not applicable"])
+            s_all = s_all[mask]
+            labels_use = labels_aligned[mask.to_numpy()]
+        else:
+            labels_use = labels_aligned
+        cats = s_all.value_counts(dropna=False).index.tolist()
 
-    # --- raw pairwise diffs (unnormalized) ---
-    ordinal_raw = compute_pairwise_differences(medoids[ordinal_cols])
-    binary = compute_pairwise_differences(medoids[binary_cols])
+        for cat in cats:
+            row = {"feature": f"{feat}={cat}"}
+            for c1, c2 in pairs:
+                s1 = s_all[labels_use == c1]
+                s2 = s_all[labels_use == c2]
+                denom1 = float(len(s1)) if len(s1) else 1.0
+                denom2 = float(len(s2)) if len(s2) else 1.0
+                p1 = float((s1 == cat).sum()) / denom1
+                p2 = float((s2 == cat).sum()) / denom2
+                row[f"C{c1}-C{c2}"] = abs(p1 - p2)
+            rows.append(row)
 
-    # --- IQR-normalized ordinal ---
-    iqr = df[ordinal_cols].quantile(0.75) - df[ordinal_cols].quantile(0.25)
-    ordinal_iqr = ordinal_raw.divide(iqr.replace(0, np.nan), axis=0)
-
-    # --- save tables ---
-    ordinal_raw.to_csv(OUT_DIR / "pairwise_medoid_diff_ordinal_raw_k6.csv")
-    ordinal_iqr.to_csv(OUT_DIR / "pairwise_medoid_diff_ordinal_iqr_k6.csv")
-    binary.to_csv(OUT_DIR / "pairwise_medoid_diff_binary_k6.csv")
-
-    # --- plots ---
-    plot_heatmap(
-        ordinal_iqr,
-        "Ordinal feature separation (IQR-normalized) — k=6",
-        OUT_DIR / "pairwise_medoid_diff_ordinal_iqr_k6.png",
-    )
-
-    plot_heatmap(
-        ordinal_raw,
-        "Ordinal feature separation (unnormalized) — k=6",
-        OUT_DIR / "pairwise_medoid_diff_ordinal_raw_k6.png",
-    )
-
-    plot_heatmap(
-        binary,
-        "Binary feature separation — k=6",
-        OUT_DIR / "pairwise_medoid_diff_binary_k6.png",
-        vmax=1,
-    )
+    df = pd.DataFrame(rows).set_index("feature")
+    return df
 
 
 # ============================================================
@@ -4271,14 +2970,9 @@ def main():
     pct_some, cnt_some, total = _pct_and_count_over_full(values, code_some)
     pct_very, cnt_very, _ = _pct_and_count_over_full(values, code_very)
 
-    print(f"\nCluster {CLUSTER_ID}")
-    print("Somewhat open:", fmt_pct(pct_some))
-    print("Very open:", fmt_pct(pct_very))
-
-
-    print("\nCreating cluster-pair heatmaps...")
-    run_pairwise_heatmaps(df, labels)
-    print("Done.")
+    # prints removed
+    # Pairwise medoid-diff heatmaps removed; keep only raw top-30 heatmap.
+    # done message removed
 
 
 
@@ -4887,698 +3581,536 @@ def plot_raw_benefits_and_resources_stacked_by_cluster(
     plt.close()
 
 
-def _normalize_interview_answer(x: object) -> str:
-    """
-    Normalizes raw interview answers (mh_interview / ph_interview) into 3 buckets:
-      Y = Yes
-      N = No
-      M = Maybe (and missing / unexpected)
-    """
-    if pd.isna(x):
-        return "M"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"yes", "y"}:
-        return "Y"
-    if s_low in {"no", "n"}:
-        return "N"
-    if s_low in {"maybe", "m"}:
-        return "M"
-
-    return "M"
-
-
-def plot_raw_mh_and_ph_interview_stacked_by_cluster(
+def plot_raw_feature_panel(
     df_raw: pd.DataFrame,
     labels_aligned: np.ndarray,
-    mh_feature: str,
-    ph_feature: str,
+    features: list[str],
     out_path: Path,
+    suptitle: str,
+    ncols: int = 3,
+    color_map: Optional[dict[str, str]] = None,
+    recode_map: Optional[dict[str, "Callable[[pd.Series], pd.Series]"]] = None,
+    legend_mode: str = "shared",
+    legend_order: Optional[list[str]] = None,
 ) -> None:
-    """
-    Combined raw feature plot: 'mh and ph interview'
-
-    - combines two raw driver features into 9 joint answer categories:
-        MH interview: Y / N / M
-        PH interview: Y / N / M
-      -> 3 * 3 = 9 combinations
-
-    Legend uses compact labels of the form:
-      MH:Y PH:M
-    """
     import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
 
-    mh = df_raw[mh_feature].map(_normalize_interview_answer)
-    ph = df_raw[ph_feature].map(_normalize_interview_answer)
+    n = len(features)
+    ncols = max(1, ncols)
+    nrows = (n + ncols - 1) // ncols
 
-    joint = ("MH:" + mh + " PH:" + ph).astype(str)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 2.6 * nrows), dpi=150)
+    axes = np.asarray(axes).ravel()
 
     clusters = sorted(np.unique(labels_aligned).tolist())
-
-    overall_counts = joint.value_counts(dropna=False)
-    categories = overall_counts.sort_values(ascending=False).index.tolist()
-
-    mat = []
-    for c in clusters:
-        s_c = joint[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
     x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
 
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
+    # Build a global category list across all features to ensure legend completeness (shared legend mode).
+    all_categories: list[str] = []
+    if legend_mode == "shared":
+        for feat in features:
+            series = df_raw[feat].copy()
+            if recode_map is not None and feat in recode_map:
+                series = recode_map[feat](series)
+            series = series.astype(object)
+            series[pd.isna(series)] = "NA"
+            series = series.astype(str).str.strip().replace({"": "NA"})
+            cats = series.value_counts(dropna=False).index.tolist()
+            for c in cats:
+                if c not in all_categories:
+                    all_categories.append(c)
 
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): mh and ph interview")
+    # Assign colors deterministically for any categories not explicitly mapped.
+    color_for_cat: dict[str, str] = {}
+    if color_map:
+        color_for_cat.update(color_map)
+    palette = plt.get_cmap("tab20").colors
+    idx = 0
+    seed_cats = all_categories if all_categories else []
+    for c in seed_cats:
+        if c in color_for_cat:
+            continue
+        color_for_cat[c] = palette[idx % len(palette)]
+        idx += 1
 
-    plt.legend(
-        title="Answer (MH=mh_interview, PH=ph_interview)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-    )
+    for i, feat in enumerate(features):
+        ax = axes[i]
+        series = df_raw[feat].copy()
+        if recode_map is not None and feat in recode_map:
+            series = recode_map[feat](series)
+        series = series.astype(object)
+        series[pd.isna(series)] = "NA"
+        series = series.astype(str).str.strip().replace({"": "NA"})
 
-    plt.tight_layout()
+        overall_counts = series.value_counts(dropna=False)
+        categories = overall_counts.index.tolist()
+
+        mat = []
+        for c in clusters:
+            s_c = series[labels_aligned == c]
+            vc = s_c.value_counts(dropna=False)
+            total = len(s_c)
+            props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
+            mat.append(props)
+        mat = np.array(mat, dtype=float)
+
+        bottom = np.zeros(len(clusters), dtype=float)
+        for j, cat in enumerate(categories):
+            color = color_for_cat.get(cat) if color_for_cat else None
+            ax.bar(x, mat[:, j], bottom=bottom, label=str(cat), color=color)
+            bottom += mat[:, j]
+
+        ax.set_xticks(x, [str(c) for c in clusters])
+        ax.set_ylim(0, 1.0)
+        ax.set_xlabel("")
+        ax.set_title(feat)
+        if legend_mode == "per_subplot":
+            ax.legend(title="Answer", bbox_to_anchor=(1.02, 1.0), loc="upper left", fontsize=7)
+
+    for j in range(n, len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle(suptitle, y=0.99, fontsize=14)
+    fig.text(0.02, 0.5, "Proportion within cluster", va="center", rotation="vertical")
+    fig.supxlabel("Cluster", y=0.01)
+
+    legend_handles = [mpatches.Patch(color=color_for_cat[c], label=c) for c in all_categories]
+    if legend_mode == "shared":
+        if legend_order:
+            ordered = [c for c in legend_order if c in all_categories]
+            extras = [c for c in all_categories if c not in ordered]
+            legend_cats = ordered + extras
+        else:
+            legend_cats = all_categories
+        legend_handles = [mpatches.Patch(color=color_for_cat[c], label=c) for c in legend_cats]
+        if legend_handles:
+            fig.legend(
+                handles=legend_handles,
+                title="Answer",
+                loc="upper left",
+                bbox_to_anchor=(0.885, 0.98),
+                fontsize=8,
+            )
+        plt.tight_layout(rect=[0.04, 0.03, 0.86, 0.96])
+    else:
+        plt.tight_layout(rect=[0.04, 0.03, 1, 0.96])
     plt.savefig(out_path, bbox_inches="tight")
+    try:
+        from IPython.display import Image, display
+        # panel display message removed
+        display(Image(filename=str(out_path)))
+    except Exception:
+        pass
     plt.close()
 
 
-def _normalize_current_anonymity_value(x: object) -> str:
-    """
-    Normalizes raw 'anonymity_protected' answers into 3 buckets:
-      Y  = Yes
-      N  = No
-      DK = I don't know (and missing)
-    """
-    if pd.isna(x):
-        return "DK"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"yes", "y"}:
-        return "Y"
-    if s_low in {"no", "n"}:
-        return "N"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "DK"
-
-    return "DK"
-
-
-def _normalize_prev_anonymity_value_merged(x: object) -> str:
-    """
-    Normalizes raw 'prev_anonymity_protected' answers, but merges:
-      - 'Yes, always' and 'Sometimes' -> '≥S' (at least sometimes)
-
-    Buckets returned:
-      GE_S = '≥S'  (at least sometimes)
-      N    = No
-      NA   = Not applicable
-      DK   = I don't know (and missing)
-
-    This is only used for the combined "current and previous anonymity" feature.
-    """
-    if pd.isna(x):
-        return "DK"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"no", "n"}:
-        return "N"
-    if "not applicable" in s_low or s_low in {"na", "n/a", "n.a.", "n\\a"}:
-        return "NA"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "DK"
-
-    # merge the two requested categories
-    if "yes, always" in s_low or s_low == "yes, always":
-        return "≥S"
-    if "sometimes" in s_low:
-        return "≥S"
-
-    return "DK"
-
-
-def plot_raw_current_and_previous_anonymity_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    current_feature: str,
-    prev_feature: str,
-    out_path: Path,
-) -> None:
-    """
-    Combined raw feature plot: 'current and previous anonymity'
-
-    - current_feature (anonymity_protected): Y / N / DK
-    - prev_feature (prev_anonymity_protected), with merge:
-        'Yes, always' + 'Sometimes' -> '≥S' (at least sometimes)
-      then buckets: ≥S / N / NA / DK
-
-    -> 3 * 4 = 12 joint categories
-
-    Legend uses compact labels of the form:
-      C:Y P:≥S
-    """
-    import matplotlib.pyplot as plt
-
-    cur = df_raw[current_feature].map(_normalize_current_anonymity_value)
-    prev = df_raw[prev_feature].map(_normalize_prev_anonymity_value_merged)
-
-    joint = ("C:" + cur + " P:" + prev).astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    overall_counts = joint.value_counts(dropna=False)
-    categories = overall_counts.sort_values(ascending=False).index.tolist()
-
-    mat = []
-    for c in clusters:
-        s_c = joint[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): current and previous anonymity")
-
-    plt.legend(
-        title="Answer (C=current, P=previous; ≥S=≥ sometimes; NA=not applicable)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def _normalize_mhdcoworker_not_reveal(x: object) -> str:
-    """
-    Normalizes raw 'mhdcoworker_you_not_reveal' answers WITHOUT merging categories.
-    We only map each distinct response to a short code (1:1 mapping).
-    NOTE: NaN is treated as "NR" (no response) to keep the joint space at 5 reveal categories.
-
-    Codes:
-      Y   = Yes
-      N   = No
-      M   = Maybe
-      NAp = Not applicable
-      NR  = No response (and missing)
-    """
-    if pd.isna(x):
-        return "NR"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"yes", "y"}:
-        return "Y"
-    if s_low in {"no", "n"}:
-        return "N"
-    if s_low in {"maybe", "m"}:
-        return "M"
-    if "not applicable" in s_low:
-        return "NAp"
-    if "no response" in s_low:
-        return "NR"
-
-    return f"X:{s}"
-
-
-def _normalize_observed_bad_conseq_raw(x: object) -> str:
-    """
-    Normalizes raw 'observed_mhdcoworker_bad_conseq' answers WITHOUT merging categories.
-    This feature is typically 0/1.
-    NOTE: NaN is treated as "0" to keep the joint space at 2 consequence categories.
-
-    Codes:
-      0 / 1 = as-is
-      X:<...> = unexpected non-0/1 strings
-    """
-    if pd.isna(x):
-        return "0"
-    s = str(x).strip()
-    if s in {"0", "1"}:
-        return s
-    s_low = s.lower()
-    if s_low in {"false"}:
-        return "0"
-    if s_low in {"true"}:
-        return "1"
-    return f"X:{s}"
-
-
-def _normalize_ever_observed_bad_response(x: object) -> str:
-    """
-    Normalizes raw 'ever_observed_mhd_bad_response' answers WITHOUT merging categories.
-    We map each distinct response to a short code (1:1 mapping).
-    NOTE: NaN is treated as "NR" (no response) to keep the joint space at 5 observed categories.
-
-    Codes:
-      N   = No
-      M   = Maybe/Not sure
-      YO  = Yes, I observed
-      YE  = Yes, I experienced
-      NR  = No response (and missing)
-    """
-    if pd.isna(x):
-        return "NR"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"no", "n"}:
-        return "N"
-    if "maybe" in s_low or "not sure" in s_low:
-        return "M"
-    if "yes" in s_low and "observed" in s_low:
-        return "YO"
-    if "yes" in s_low and "experienced" in s_low:
-        return "YE"
-    if "no response" in s_low:
-        return "NR"
-
-    return f"X:{s}"
-
-
-def plot_raw_mhd_coworker_combo_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    reveal_feature: str,
-    conseq_feature: str,
-    ever_feature: str,
-    out_path: Path,
-) -> None:
-    """
-    Combined raw feature plot for:
-      - mhdcoworker_you_not_reveal
-      - observed_mhdcoworker_bad_conseq
-      - ever_observed_mhd_bad_response
-
-    The full expected joint space is forced to show (5 * 2 * 5 = 50 combos):
-      Reveal:  NAp / N / Y / NR / M
-      Conseq:  0 / 1
-      Ever:    N / M / YO / YE / NR
-    """
-    import matplotlib.pyplot as plt
-
-    r = df_raw[reveal_feature].map(_normalize_mhdcoworker_not_reveal)
-    c = df_raw[conseq_feature].map(_normalize_observed_bad_conseq_raw)
-    e = df_raw[ever_feature].map(_normalize_ever_observed_bad_response)
-
-    joint = ("R:" + r + " C:" + c + " E:" + e).astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    R_vals = ["NAp", "N", "Y", "NR", "M"]
-    C_vals = ["0", "1"]
-    E_vals = ["N", "M", "YO", "YE", "NR"]
-    categories = [f"R:{rv} C:{cv} E:{ev}" for rv in R_vals for cv in C_vals for ev in E_vals]
-
-    mat = []
-    for cl in clusters:
-        s_cl = joint[labels_aligned == cl]
-        vc = s_cl.value_counts(dropna=False)
-        total = len(s_cl)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(cl) for cl in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): mhd coworker combo")
-
-    plt.legend(
-        title="Answer (R=reveal, C=conseq, E=ever; NAp=not applicable; NR=no response)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-        ncol=2,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def plot_raw_observe_vs_reveal_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    reveal_feature: str,
-    observed_feature: str,
-    out_path: Path,
-) -> None:
-    """
-    Combined raw feature plot: 'observe_vs_reveal'
-
-    - reveal_feature: mhdcoworker_you_not_reveal (5 categories)
-    - observed_feature: ever_observed_mhd_bad_response (5 categories)
-    -> 25 joint categories
-
-    Joint space is forced to show (5 * 5 = 25 combos):
-      Reveal:  NAp / N / Y / NR / M
-      Observed: N / M / YO / YE / NR
-    """
-    import matplotlib.pyplot as plt
-
-    r = df_raw[reveal_feature].map(_normalize_mhdcoworker_not_reveal)
-    o = df_raw[observed_feature].map(_normalize_ever_observed_bad_response)
-
-    joint = ("R:" + r + " O:" + o).astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    R_vals = ["NAp", "N", "Y", "NR", "M"]
-    O_vals = ["N", "M", "YO", "YE", "NR"]
-    categories = [f"R:{rv} O:{ov}" for rv in R_vals for ov in O_vals]
-
-    mat = []
-    for c in clusters:
-        s_c = joint[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): observe_vs_reveal")
-
-    plt.legend(
-        title="Answer (R=reveal, O=observed; NAp=not applicable; NR=no response)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-        ncol=2,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def _normalize_boss_serious_value(x: object) -> str:
-    """
-    Normalizes raw 'mh_ph_boss_serious' answers into 3 buckets:
-      Yes / No / I don't know
-    Missing is treated as "I don't know".
-    """
-    if pd.isna(x):
-        return "I don't know"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    if s_low in {"yes", "y"}:
-        return "Yes"
-    if s_low in {"no", "n"}:
-        return "No"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "I don't know"
-
-    return "I don't know"
-
-
-def _normalize_prev_boss_serious_value_merged(x: object) -> str:
-    """
-    Normalizes raw 'mh_ph_prev_boss_serious' answers, but merges:
-      - 'Yes, they all did' and 'Some did' -> 'At least some did'
-
-    Buckets returned:
-      At least some did
-      None did
-      I don't know
-      Not applicable
-
-    Missing is treated as "I don't know".
-    """
-    if pd.isna(x):
-        return "I don't know"
-    s = str(x).strip()
-    s_low = s.lower()
-
-    # merge requested categories
-    if "yes, they all did" in s_low or s_low == "yes, they all did":
-        return "At least some did"
-    if s_low == "some did" or "some did" in s_low:
-        return "At least some did"
-
-    if s_low == "none did" or "none did" in s_low:
-        return "None did"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "I don't know"
-    if "not applicable" in s_low or s_low in {"na", "n/a", "n.a.", "n\\a"}:
-        return "Not applicable"
-
-    return "I don't know"
-
-
-def plot_raw_boss_and_prev_boss_serious_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    boss_feature: str,
-    prev_boss_feature: str,
-    out_path: Path,
-) -> None:
-    """
-    Combined raw feature plot: 'boss serious' + 'previous boss serious' (with merge)
-
-    - boss_feature (mh_ph_boss_serious): Yes / No / I don't know
-    - prev_boss_feature (mh_ph_prev_boss_serious), with merge:
-        'Yes, they all did' + 'Some did' -> 'At least some did'
-      then buckets:
-        At least some did / None did / I don't know / Not applicable
-
-    -> 3 * 4 = 12 joint categories
-
-    Legend uses labels of the form:
-      B:Yes P:At least some did
-    """
-    import matplotlib.pyplot as plt
-
-    b = df_raw[boss_feature].map(_normalize_boss_serious_value)
-    p = df_raw[prev_boss_feature].map(_normalize_prev_boss_serious_value_merged)
-
-    joint = ("B:" + b + " P:" + p).astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    overall_counts = joint.value_counts(dropna=False)
-    categories = overall_counts.sort_values(ascending=False).index.tolist()
-
-    mat = []
-    for c in clusters:
-        s_c = joint[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): boss serious and previous boss serious")
-
-    plt.legend(
-        title="Answer (B=boss serious, P=previous boss serious)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
 
 
 def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray) -> None:
     """
     Creates one PNG per raw feature in df_raw (excluding respondent_id).
     """
+    # raw plot header messages removed
+
+    # Weak separators panel (restore)
+    panel_features = [
+        "remote_work",
+        "tech_company",
+        "mh_interview",
+        "company_size",
+        "prev_boss",
+        "ph_interview",
+        "bad_conseq_ph_prev_boss",
+        "observed_mhdcoworker_bad_conseq",
+        "bad_conseq_ph_boss",
+    ]
+    available = [f for f in panel_features if f in df_raw.columns]
+    if len(available) == len(panel_features):
+        panel_path = RAW_PLOTS_DIR / "raw_dist_k6_panel_weak_separators.png"
+        global_color_map = {
+            "Yes": "#2ca02c",
+            "No": "#d62728",
+            "Maybe": "#1f77b4",
+            "1": "#2ca02c",
+            "0": "#d62728",
+        }
+        plot_raw_feature_panel(
+            df_raw=df_raw,
+            labels_aligned=labels_aligned,
+            features=available,
+            out_path=panel_path,
+            suptitle="Feature distributions across 6 clusters (weak separators — mostly uniform distributions)",
+            ncols=3,
+            color_map=global_color_map,
+            legend_mode="per_subplot",
+        )
+    else:
+        missing = [f for f in panel_features if f not in df_raw.columns]
+        print(f"Skipping raw feature panel (missing columns: {missing})")
+
+    # Strong separators panel
+    panel_features = [
+        "benefits",
+        "mh_ph_boss_serious",
+        "leave_easy",
+        "resources",
+        "bad_conseq_mh_boss",
+        "mh_comfort_coworkers",
+        "mh_options_known",
+        "anonymity_protected",
+        "mh_comfort_supervisor",
+    ]
+    available = [f for f in panel_features if f in df_raw.columns]
+    if len(available) == len(panel_features):
+        panel_path = RAW_PLOTS_DIR / "raw_dist_k6_panel_strong_separators.png"
+        global_color_map = {
+            "Yes": "#2ca02c",
+            "No": "#d62728",
+            "Maybe": "#1f77b4",
+            "I don't know": "#4aa3df",
+            "I am not sure": "#08306b",
+            "Neither easy nor difficult": "#9467bd",
+            "easy": "#2ca02c",
+            "difficult": "#d62728",
+            "No or not eligible for coverage": "#d62728",
+            "Not applicable": "#c7c7c7",
+        }
+
+        def recode_benefits(s: pd.Series) -> pd.Series:
+            s = s.astype(object)
+            s = s.where(~pd.isna(s), other="NA")
+            s = s.astype(str).str.strip()
+            s = s.replace({"": "NA"})
+            return s.replace(
+                {"Not eligible for coverage / N/A": "No or not eligible for coverage", "No": "No or not eligible for coverage"}
+            )
+
+        def recode_leave_easy(s: pd.Series) -> pd.Series:
+            s = s.astype(object)
+            s = s.where(~pd.isna(s), other="NA")
+            s = s.astype(str).str.strip()
+            s = s.replace({"": "NA"})
+            return s.replace(
+                {
+                    "Very difficult": "difficult",
+                    "Somewhat difficult": "difficult",
+                    "Very easy": "easy",
+                    "Somewhat easy": "easy",
+                }
+            )
+
+        recode_map = {
+            "benefits": recode_benefits,
+            "leave_easy": recode_leave_easy,
+        }
+        plot_raw_feature_panel(
+            df_raw=df_raw,
+            labels_aligned=labels_aligned,
+            features=available,
+            out_path=panel_path,
+            suptitle="Feature distributions across 6 clusters (strong separators)",
+            ncols=3,
+            color_map=global_color_map,
+            recode_map=recode_map,
+            legend_mode="shared",
+        )
+    else:
+        missing = [f for f in panel_features if f not in df_raw.columns]
+        print(f"Skipping raw feature panel (missing columns: {missing})")
+
+    # Previous employment panel (normalized answers + shared legend)
+    panel_features = [
+        "prev_benefits",
+        "mh_ph_prev_boss_serious",
+        "mh_comfort_prev_coworkers",
+        "prev_resources",
+        "bad_conseq_mh_prev_boss",
+        "mh_comfort_prev_supervisor",
+        "prev_mh_options_known",
+        "prev_boss_mh_discuss",
+        "prev_anonymity_protected",
+    ]
+    available = [f for f in panel_features if f in df_raw.columns]
+    if len(available) == len(panel_features):
+        panel_path = RAW_PLOTS_DIR / "raw_dist_k6_panel_prev_employment.png"
+        global_color_map = {
+            "Yes, all": "#2ca02c",
+            "Some": "#ff7f0e",
+            "No": "#d62728",
+            "Only became aware later": "#9467bd",
+            "I don't know": "#1f77b4",
+            "Not applicable": "#7f7f7f",
+        }
+
+        def recode_prev_answers(s: pd.Series) -> pd.Series:
+            s = s.astype(object)
+            s = s.where(~pd.isna(s), other="Not applicable")
+            s = s.astype(str).str.strip()
+            s = s.replace({"": "Not applicable"})
+            return s.replace(
+                {
+                    "No, none did": "No",
+                    "None of them": "No",
+                    "No, at none of my previous employers": "No",
+                    "No": "No",
+                    "N/A (not currently aware)": "No",
+                    "None did": "No",
+                    "Yes, they all did": "Yes, all",
+                    "Yes, I was aware of all of them": "Yes, all",
+                    "Yes, all of them": "Yes, all",
+                    "Yes, at all of my previous employers": "Yes, all",
+                    "Yes, always": "Yes, all",
+                    "yes, always": "Yes, all",
+                    "Some did": "Some",
+                    "I was aware of some": "Some",
+                    "Some of them": "Some",
+                    "Some of my previous employers": "Some",
+                    "Sometimes": "Some",
+                    "Not applicable": "Not applicable",
+                    "I don't know": "I don't know",
+                    "No, I only became aware later": "Only became aware later",
+                }
+            )
+
+        recode_map = {feat: recode_prev_answers for feat in panel_features}
+        legend_order = ["Yes, all", "Some", "No", "Only became aware later", "I don't know", "Not applicable"]
+        plot_raw_feature_panel(
+            df_raw=df_raw,
+            labels_aligned=labels_aligned,
+            features=available,
+            out_path=panel_path,
+            suptitle="Previous employment feature distributions across 6 clusters",
+            ncols=3,
+            color_map=global_color_map,
+            recode_map=recode_map,
+            legend_mode="shared",
+            legend_order=legend_order,
+        )
+    else:
+        missing = [f for f in panel_features if f not in df_raw.columns]
+        print(f"Skipping previous employment panel (missing columns: {missing})")
+
+    # Stigma-related indicators panel (per-subplot legends)
+    panel_features = [
+        "prev_observed_bad_conseq_mh",
+        "mh_family_history",
+        "mhdcoworker_you_not_reveal",
+        "friends_family_mhd_comfort",
+        "ever_observed_mhd_bad_response",
+        "boss_mh_discuss",
+    ]
+    available = [f for f in panel_features if f in df_raw.columns]
+    if len(available) == len(panel_features):
+        panel_path = RAW_PLOTS_DIR / "raw_dist_k6_panel_stigma_indicators.png"
+        global_color_map = {
+            "Yes": "#2ca02c",
+            "No": "#d62728",
+            "I don't know": "#1f77b4",
+            "Not applicable": "#7f7f7f",
+            "Maybe": "#0b3c8c",
+            "Maybe/Not sure": "#0b3c8c",
+            "No response": "#9467bd",
+            "open": "#4daf4a",
+            "not open": "#b2182b",
+            "Neutral": "#f1c40f",
+            "Yes, I observed": "#ff7f0e",
+            "Yes, I experienced": "#8c564b",
+            "None of them": "#2ca02c",
+            "Some of them": "#ff7f0e",
+            "Yes, all of them": "#d62728",
+        }
+
+        def recode_stigma(s: pd.Series) -> pd.Series:
+            s = s.astype(object)
+            s = s.where(~pd.isna(s), other="Not applicable")
+            s = s.astype(str).str.strip()
+            s = s.replace({"": "Not applicable"})
+            s = s.replace({"Not applicable to me (I do not have a mental illness)": "Not applicable"})
+            s = s.replace(
+                {
+                    "Somewhat open": "open",
+                    "Very open": "open",
+                    "Somewhat not open": "not open",
+                    "Not open at all": "not open",
+                }
+            )
+            return s
+
+        recode_map = {feat: recode_stigma for feat in panel_features}
+        plot_raw_feature_panel(
+            df_raw=df_raw,
+            labels_aligned=labels_aligned,
+            features=available,
+            out_path=panel_path,
+            suptitle="Distribution of stigma-related indicators across 6 clusters",
+            ncols=3,
+            color_map=global_color_map,
+            recode_map=recode_map,
+            legend_mode="per_subplot",
+        )
+    else:
+        missing = [f for f in panel_features if f not in df_raw.columns]
+        print(f"Skipping stigma-related panel (missing columns: {missing})")
+
+
+def build_raw_cluster_vs_rest_tables(
+    df_raw: pd.DataFrame,
+    labels_aligned: np.ndarray,
+    top_n: int = 15,
+    exclude_answer_substrings: dict[int, list[str]] | None = None,
+) -> dict[int, pd.DataFrame]:
+    """
+    For each cluster, compute top-N raw feature-answer categories by absolute
+    deviation in proportion vs the rest of the sample.
+    Returns: {cluster_id: DataFrame}
+    """
     features = [c for c in df_raw.columns if c != "respondent_id"]
+    clusters = sorted(np.unique(labels_aligned).tolist())
+    results: dict[int, pd.DataFrame] = {}
 
-    print(f"\n=== Raw (pre-encoding) driver plots by cluster (k=6) ===")
-    print(f"Input file: {DRIVERS_RAW_PATH}")
-    print(f"Saving {len(features)} plots to: {RAW_PLOTS_DIR}")
+    # Pre-normalize to strings and handle missing
+    df_norm = df_raw[features].copy()
+    for col in features:
+        s = df_norm[col].astype(object)
+        s[pd.isna(s)] = "NA"
+        df_norm[col] = s.astype(str).str.strip().replace({"": "NA"})
 
-    for i, feat in enumerate(features, start=1):
-        safe_name = feat.replace("/", "_").replace("\\", "_").replace(":", "_")
-        out_path = RAW_PLOTS_DIR / f"raw_dist_k6_{safe_name}.png"
-        plot_raw_feature_stacked_by_cluster(df_raw, labels_aligned, feat, out_path)
-        if i <= 5 or i == len(features):
-            print(f"Saved: {out_path}")
-        elif i == 6:
-            print("... (suppressing further per-file logs)")
+    for c in clusters:
+        in_cluster = labels_aligned == c
+        rows = []
+        for feat in features:
+            s_all = df_norm[feat]
+            cats = s_all.value_counts(dropna=False).index.tolist()
 
-    # Additional combined plot: benefits + resources (12 joint categories)
-    if ("benefits" in df_raw.columns) and ("resources" in df_raw.columns):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_benefits_and_resources.png"
-        plot_raw_benefits_and_resources_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            benefits_feature="benefits",
-            resources_feature="resources",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in ["benefits", "resources"] if c not in df_raw.columns]
-        print(f"Skipping combined benefits/resources plot (missing columns: {missing})")
+            s_c = s_all[in_cluster]
+            s_r = s_all[~in_cluster]
+            vc_c = s_c.value_counts(dropna=False)
+            vc_r = s_r.value_counts(dropna=False)
+            denom_c = float(len(s_c)) if len(s_c) else 1.0
+            denom_r = float(len(s_r)) if len(s_r) else 1.0
 
-    # Additional combined plot: mh_interview + ph_interview (9 joint categories)
-    if ("mh_interview" in df_raw.columns) and ("ph_interview" in df_raw.columns):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_mh_and_ph_interview.png"
-        plot_raw_mh_and_ph_interview_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            mh_feature="mh_interview",
-            ph_feature="ph_interview",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in ["mh_interview", "ph_interview"] if c not in df_raw.columns]
-        print(f"Skipping combined mh/ph interview plot (missing columns: {missing})")
+            for cat in cats:
+                p_c = float(vc_c.get(cat, 0)) / denom_c
+                p_r = float(vc_r.get(cat, 0)) / denom_r
+                rows.append(
+                    {
+                        "feature": f"{feat}={cat}",
+                        "cluster_%": f"{p_c*100:.1f}%",
+                        "rest_%": f"{p_r*100:.1f}%",
+                        "_diff": abs(p_c - p_r),
+                    }
+                )
 
-    # Additional combined plot: anonymity_protected + prev_anonymity_protected (with merge to ≥S)
-    if ("anonymity_protected" in df_raw.columns) and ("prev_anonymity_protected" in df_raw.columns):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_current_and_previous_anonymity.png"
-        plot_raw_current_and_previous_anonymity_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            current_feature="anonymity_protected",
-            prev_feature="prev_anonymity_protected",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in ["anonymity_protected", "prev_anonymity_protected"] if c not in df_raw.columns]
-        print(f"Skipping combined current/previous anonymity plot (missing columns: {missing})")
+        df_all = pd.DataFrame(rows).sort_values("_diff", ascending=False)
+        if exclude_answer_substrings and int(c) in exclude_answer_substrings:
+            subs = [s.strip().lower() for s in exclude_answer_substrings[int(c)]]
+            def _keep_feature(x: str) -> bool:
+                lx = x.lower()
+                return not any(sub in lx for sub in subs)
+            df_all = df_all[df_all["feature"].map(_keep_feature)]
+        df = df_all.head(top_n).drop(columns="_diff")
+        results[int(c)] = df.reset_index(drop=True)
 
-    # Additional combined plot: mhd coworker + consequences + bad response (force 50 combos)
-    needed = ["mhdcoworker_you_not_reveal", "observed_mhdcoworker_bad_conseq", "ever_observed_mhd_bad_response"]
-    if all(col in df_raw.columns for col in needed):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_mhd_coworker_combo.png"
-        plot_raw_mhd_coworker_combo_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            reveal_feature="mhdcoworker_you_not_reveal",
-            conseq_feature="observed_mhdcoworker_bad_conseq",
-            ever_feature="ever_observed_mhd_bad_response",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in needed if c not in df_raw.columns]
-        print(f"Skipping combined mhd coworker combo plot (missing columns: {missing})")
+    return results
 
-    # Additional combined plot: observe_vs_reveal (force 25 combos)
-    if ("mhdcoworker_you_not_reveal" in df_raw.columns) and ("ever_observed_mhd_bad_response" in df_raw.columns):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_observe_vs_reveal.png"
-        plot_raw_observe_vs_reveal_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            reveal_feature="mhdcoworker_you_not_reveal",
-            observed_feature="ever_observed_mhd_bad_response",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in ["mhdcoworker_you_not_reveal", "ever_observed_mhd_bad_response"] if c not in df_raw.columns]
-        print(f"Skipping combined observe_vs_reveal plot (missing columns: {missing})")
 
-    # NEW combined plot: mh_ph_boss_serious + mh_ph_prev_boss_serious (with merge to "At least some did")
-    if ("mh_ph_boss_serious" in df_raw.columns) and ("mh_ph_prev_boss_serious" in df_raw.columns):
-        out_path = RAW_PLOTS_DIR / "raw_dist_k6_boss_and_prev_boss_serious.png"
-        plot_raw_boss_and_prev_boss_serious_stacked_by_cluster(
-            df_raw,
-            labels_aligned,
-            boss_feature="mh_ph_boss_serious",
-            prev_boss_feature="mh_ph_prev_boss_serious",
-            out_path=out_path,
-        )
-        print(f"Saved: {out_path}")
-    else:
-        missing = [c for c in ["mh_ph_boss_serious", "mh_ph_prev_boss_serious"] if c not in df_raw.columns]
-        print(f"Skipping combined boss/prev boss serious plot (missing columns: {missing})")
+def build_raw_cluster_vs_rest_selected(
+    df_raw: pd.DataFrame,
+    labels_aligned: np.ndarray,
+    cluster_id: int,
+    selected_features: list[str],
+) -> pd.DataFrame:
+    features = [f for f in df_raw.columns if f != "respondent_id"]
+    selected_lc = {x.strip().lower() for x in selected_features}
+
+    df_norm = df_raw[features].copy()
+    for col in features:
+        s = df_norm[col].astype(object)
+        s[pd.isna(s)] = "NA"
+        df_norm[col] = s.astype(str).str.strip().replace({"": "NA"})
+
+    in_cluster = labels_aligned == cluster_id
+    rows = []
+    for feat in features:
+        s_all = df_norm[feat]
+        cats = s_all.value_counts(dropna=False).index.tolist()
+
+        s_c = s_all[in_cluster]
+        s_r = s_all[~in_cluster]
+        vc_c = s_c.value_counts(dropna=False)
+        vc_r = s_r.value_counts(dropna=False)
+        denom_c = float(len(s_c)) if len(s_c) else 1.0
+        denom_r = float(len(s_r)) if len(s_r) else 1.0
+
+        for cat in cats:
+            key = f"{feat}={cat}"
+            if key.strip().lower() not in selected_lc:
+                continue
+            p_c = float(vc_c.get(cat, 0)) / denom_c
+            p_r = float(vc_r.get(cat, 0)) / denom_r
+            rows.append(
+                {
+                    "feature": key,
+                    "cluster_%": f"{p_c*100:.1f}%",
+                    "rest_%": f"{p_r*100:.1f}%",
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def build_raw_pairwise_tables(
+    df_raw: pd.DataFrame,
+    labels_aligned: np.ndarray,
+    pairs: list[tuple[int, int]],
+    top_n: int = 15,
+) -> dict[tuple[int, int], pd.DataFrame]:
+    """
+    For each cluster pair, compute top-N raw feature-answer categories by absolute
+    deviation in proportion between the two clusters.
+    Returns: {(c1, c2): DataFrame}
+    """
+    features = [c for c in df_raw.columns if c != "respondent_id"]
+    results: dict[tuple[int, int], pd.DataFrame] = {}
+
+    df_norm = df_raw[features].copy()
+    for col in features:
+        s = df_norm[col].astype(object)
+        s[pd.isna(s)] = "NA"
+        df_norm[col] = s.astype(str).str.strip().replace({"": "NA"})
+
+    for c1, c2 in pairs:
+        mask1 = labels_aligned == c1
+        mask2 = labels_aligned == c2
+        rows = []
+        for feat in features:
+            s_all = df_norm[feat]
+            cats = s_all.value_counts(dropna=False).index.tolist()
+
+            s_1 = s_all[mask1]
+            s_2 = s_all[mask2]
+            vc1 = s_1.value_counts(dropna=False)
+            vc2 = s_2.value_counts(dropna=False)
+            denom1 = float(len(s_1)) if len(s_1) else 1.0
+            denom2 = float(len(s_2)) if len(s_2) else 1.0
+
+            for cat in cats:
+                p1 = float(vc1.get(cat, 0)) / denom1
+                p2 = float(vc2.get(cat, 0)) / denom2
+                rows.append(
+                    {
+                        "feature": f"{feat}={cat}",
+                        f"cluster_{c1}_%": f"{p1*100:.1f}%",
+                        f"cluster_{c2}_%": f"{p2*100:.1f}%",
+                        "_diff": abs(p1 - p2),
+                    }
+                )
+
+        df = pd.DataFrame(rows).sort_values("_diff", ascending=False).head(top_n).drop(columns="_diff")
+        results[(int(c1), int(c2))] = df.reset_index(drop=True)
+
+    return results
 
 
 # ------------------------------------------------------------
@@ -5595,61 +4127,20 @@ def pam_cluster_profiles_main() -> None:
 
     clusters = sorted(np.unique(labels))
 
-    print("\n=== k=6 Cluster Sizes ===")
+    size_rows = []
     for c in clusters:
-        n = np.sum(labels == c)
-        print(f"Cluster {c}: {n} ({n/len(labels)*100:.1f}%)")
-
-    # ------------------------
-    # ORIGINAL cluster vs rest tables
-    # ------------------------
-    for c in clusters:
-        print("\n" + "="*100)
-        print(f"CLUSTER {c}")
-        print("="*100)
-
-        print("\nBinary (Top 10 by deviation vs rest):")
-        df_bin = build_binary_table(X, binary_feats, labels, c)
-        print(df_bin.to_string(index=False))
-
-        print("\nOrdinal (Top 10 by deviation vs rest):")
-        df_ord = build_ordinal_table(X, ordinal_feats, labels, c)
-        print(df_ord.to_string(index=False))
-
-        # ------------------------
-        # NEW: High-prevalence lists
-        # ------------------------
-        print(f"\nBinary features with proportion >= {THRESHOLD:.2f} in cluster:")
-        df_bhi = list_binary_features_ge_threshold(X, binary_feats, labels, c, THRESHOLD)
-        if df_bhi.empty:
-            print("(none)")
-        else:
-            print(df_bhi.to_string(index=False))
-
-        print(f"\nOrdinal values with share >= {THRESHOLD:.2f} in cluster (value shown is the qualifying answer):")
-        df_ohi = list_ordinal_values_ge_threshold(X, ordinal_feats, labels, c, THRESHOLD)
-        if df_ohi.empty:
-            print("(none)")
-        else:
-            print(df_ohi.to_string(index=False))
-
-    # ------------------------
-    # Pairwise comparisons
-    # ------------------------
-    comparisons = [(0, 1), (3, 4), (2, 5)]
-
-    for c1, c2 in comparisons:
-        print("\n" + "=" * 110)
-        print(f"CLUSTER {c1} vs CLUSTER {c2}")
-        print("=" * 110)
-
-        print("\nBinary (Top 10 separators):")
-        df_bin = build_binary_pairwise(X, binary_feats, labels, c1, c2)
-        print(df_bin.to_string(index=False))
-
-        print("\nOrdinal (Top 10 separators):")
-        df_ord = build_ordinal_pairwise(X, ordinal_feats, labels, c1, c2)
-        print(df_ord.to_string(index=False))
+        n = int(np.sum(labels == c))
+        size_rows.append({
+            "cluster": int(c),
+            "count": n,
+            "percent": round(n / len(labels) * 100, 1),
+        })
+    size_df = pd.DataFrame(size_rows)
+    try:
+        from IPython.display import display, HTML
+        display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
+    except Exception:
+        print(size_df.to_string(index=False))
 
     # ------------------------
     # NEW: Raw (pre-encoding) plots by cluster
@@ -5657,6 +4148,241 @@ def pam_cluster_profiles_main() -> None:
     df_raw = load_preprocessed_drivers_raw()
     labels_raw = align_labels_to_raw(df_raw, labels)
     make_all_raw_feature_plots(df_raw, labels_raw)
+
+    # Raw pairwise feature separation heatmap (Top 30)
+    raw_all = _build_raw_pairwise_diff_matrix(df_raw, labels_raw, drop_missing=False)
+    out_top30 = OUT_DIR / "pairwise_raw_feature_separation_top30_k6.png"
+    plot_heatmap(
+        raw_all,
+        "Raw feature separation (top 30 by max diff) — k=6",
+        out_top30,
+        vmax=None,
+        max_rows=30,
+    )
+
+    try:
+        from IPython.display import Image, display
+        # heatmap display message removed
+        display(Image(filename=str(out_top30)))
+    except Exception:
+        pass
+
+    # Raw feature answers: cluster vs rest (Top 15)
+    exclude_subs = {
+        1: ["not applicable"],
+    }
+    raw_tables = build_raw_cluster_vs_rest_tables(
+        df_raw,
+        labels_raw,
+        top_n=15,
+        exclude_answer_substrings=exclude_subs,
+    )
+    for c in sorted(raw_tables.keys()):
+        if c == 0:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 0 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "prev_boss=Yes",
+                "bad_conseq_mh_boss=Maybe",
+                "anonymity_protected=I don't know",
+                "prev_boss_mh_discuss=None did",
+                "boss_mh_discuss=No",
+            ]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=0,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 0 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        elif c == 1:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 1 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "resources=No",
+                "mh_options_known=Yes",
+                "boss_mh_discuss=None did",
+                "mh_ph_boss_serious=I don't know",
+                "bad_conseq_ph_boss=No",
+                "bad_conseq_mh_boss=Maybe",
+                "anonymity_protected=I don't know",
+                "mh_interview=No",
+                "mh_comfort_coworkers=No",
+                "mh_comfort_supervisor=No",
+            ]
+            # fix common typos
+            selected = [s.replace("bad_consew", "bad_conseq") for s in selected]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=1,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 1 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        elif c == 2:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 2 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "resources=No",
+                "resources=I don't know",
+                "prev_resources=Some did",
+                "prev_resources=Yes, they all did",
+                "mh_ph_boss_serious=I don't know",
+                "mh_ph_boss_serious=No",
+                "bad_conseq_mh_boss=Maybe",
+                "bad_conseq_mh_prev_boss=Some of them",
+                "bad_conseq_mh_prev_boss=Yes, all of them",
+                "boss_mh_discuss=No",
+                "prev_boss_mh_discuss=None did",
+                "prev_observed_bad_conseq_mh=Some of them",
+                "prev_observed_bad_conseq_mh=Yes, all of them",
+            ]
+            selected = [s.replace("prev_resouces", "prev_resources") for s in selected]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=2,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 2 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        elif c == 3:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 3 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "boss_mh_discuss=No",
+                "mh_ph_boss_serious=No",
+                "bad_conseq_mh_boss=Yes",
+                "anonymity_protected=I don't know",
+                "anonymity_protected=No",
+                "mh_comfort_supervisor=No",
+                "mh_comfort_coworkers=No",
+                "mh_interview=No",
+                "ph_interview=No",
+                "leave_easy=Very difficult",
+                "leave_easy=Somewhat difficult",
+                "mh_family_history=Yes",
+                "ever_observed_mhd_bad_response=Yes, I observed",
+                "ever_observed_mhd_bad_response=Yes, I experienced",
+                "prev_benefits=No, none did",
+            ]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=3,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 3 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        elif c == 4:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 4 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "prev_anonymity_protected=I don't know",
+                "anonymity_protected=I don't know",
+                "boss_mh_discuss=No",
+                "bad_conseq_mh_boss=No",
+                "bad_conseq_mh_boss=Maybe",
+                "prev_observed_bad_conseq_mh=None of them",
+                "mh_family_history=No",
+            ]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=4,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 4 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        elif c == 5:
+            try:
+                from IPython.display import display, HTML
+                display(HTML("<b>CLUSTER 5 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
+            except Exception:
+                print(raw_tables[c].to_string(index=False))
+
+            selected = [
+                "mh_options_known=Yes",
+                "leave_easy=Very easy",
+                "leave_easy=Somewhat easy",
+                "leave_easy=Neither easy nor difficult",
+                "bad_conseq_mh_boss=Yes",
+                "mh_comfort_coworkers=Maybe",
+                "mh_comfort_supervisor=Maybe",
+                "friends_family_mhd_comfort=Somewhat open",
+                "friends_family_mhd_comfort=Very open",
+                "mh_family_history=Yes",
+            ]
+            forced_df = build_raw_cluster_vs_rest_selected(
+                df_raw=df_raw,
+                labels_aligned=labels_raw,
+                cluster_id=5,
+                selected_features=selected,
+            )
+            if not forced_df.empty:
+                try:
+                    from IPython.display import display, HTML
+                    display(HTML("<b>CLUSTER 5 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
+                except Exception:
+                    print(forced_df.to_string(index=False))
+        else:
+            print("\n" + "=" * 100)
+            print(f"RAW (pre-encoding) — CLUSTER {c} vs REST (Top 15 by deviation)")
+            print("=" * 100)
+            print(raw_tables[c].to_string(index=False))
+
+    # Raw feature answers: pairwise cluster comparisons (Top 15)
+    pairs = [(0, 1), (2, 5), (3, 4)]
+    pair_tables = build_raw_pairwise_tables(df_raw, labels_raw, pairs=pairs, top_n=15)
+    for c1, c2 in pairs:
+        title = f"CLUSTER {c1} vs CLUSTER {c2} (Top deviations)"
+        try:
+            from IPython.display import display, HTML
+            display(HTML("<b>" + title + "</b>" + pair_tables[(c1, c2)].to_html(index=False)))
+        except Exception:
+            print(pair_tables[(c1, c2)].to_string(index=False))
 
 
 pam_cluster_profiles_main()
@@ -6032,11 +4758,12 @@ def plot_categorical_stacked_by_cluster(
     series: pd.Series,
     labels: np.ndarray,
     title: str,
-    out_path: Path,
+    out_path: Optional[Path] = None,
     category_order: Optional[List[str]] = None,
     legend_title: str = "Answer",
     min_prop_to_keep: float = 0.0,
     max_categories: Optional[int] = None,
+    ax: Optional["plt.Axes"] = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -6080,21 +4807,71 @@ def plot_categorical_stacked_by_cluster(
 
     mat = np.asarray(mat, dtype=float)
 
-    plt.figure(figsize=(10, 4.5), dpi=150)
+    if ax is None:
+        fig = plt.figure(figsize=(10, 4.5), dpi=150)
+        ax = plt.gca()
     x = np.arange(len(clusters))
     bottom = np.zeros(len(clusters), dtype=float)
 
     for j, cat in enumerate(cats):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
+        ax.bar(x, mat[:, j], bottom=bottom, label=str(cat))
         bottom += mat[:, j]
 
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title(title)
+    ax.set_xticks(x, [str(c) for c in clusters])
+    ax.set_ylim(0, 1.0)
+    ax.set_xlabel("Cluster")
+    ax.set_ylabel("Proportion within cluster")
+    ax.set_title(title)
+    ax.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
 
-    plt.legend(
+
+def dominant_answer_table(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    features: list[str],
+) -> pd.DataFrame:
+    clusters = sorted(np.unique(labels).astype(int).tolist())
+    rows = []
+    for c in clusters:
+        row = {"cluster": c}
+        for feat in features:
+            if feat not in df.columns:
+                row[feat] = "NA"
+                continue
+            s = df[feat].astype(object)
+            s[pd.isna(s)] = "NA"
+            s = s.astype(str).str.strip().replace({"": "NA"})
+            s_c = s[labels == c]
+            denom = float(len(s_c)) if len(s_c) else 1.0
+            vc = s_c.value_counts(dropna=False)
+            top_val = str(vc.index[0])
+            pct = (vc.iloc[0] / denom) * 100.0
+            row[feat] = f"{top_val} ({pct:.1f}%)"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def cluster_answer_pct_table(
+    series: pd.Series,
+    labels: np.ndarray,
+) -> pd.DataFrame:
+    s = series.astype(object)
+    s[pd.isna(s)] = "NA"
+    s = s.astype(str).str.strip().replace({"": "NA"})
+    clusters = sorted(np.unique(labels).astype(int).tolist())
+    cats = s.value_counts(dropna=False).index.tolist()
+    rows = []
+    for c in clusters:
+        s_c = s[labels == c]
+        denom = float(len(s_c)) if len(s_c) else 1.0
+        vc = s_c.value_counts(dropna=False)
+        row = {"cluster": c}
+        for cat in cats:
+            row[str(cat)] = f"{(vc.get(cat, 0) / denom) * 100:.1f}%"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+    ax.legend(
         title=legend_title,
         bbox_to_anchor=(1.02, 1.0),
         loc="upper left",
@@ -6103,9 +4880,10 @@ def plot_categorical_stacked_by_cluster(
         ncol=1,
     )
 
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
+    if out_path is not None:
+        plt.tight_layout()
+        plt.savefig(out_path, bbox_inches="tight")
+        plt.close()
 
 
 # -----------------------------
@@ -6169,66 +4947,229 @@ def main() -> None:
 
     df = apply_recodes(df_over)
     features = [c for c in df.columns if c != "respondent_id"]
+    exclude = {
+        "mhd_believe_condition",
+        "mhd_diagnosed_condition",
+        "treat_mhd_bad_work",
+        "US_state",
+        "US_work",
+    }
+    features = [c for c in features if c not in exclude]
 
-    print(f"Plotting {len(features)} overlay features to: {args.outdir}")
+    # overlay plots skip message removed
 
-    for feat in features:
-        s = df[feat]
-        out = args.outdir / f"overlay_k{args.k}_{safe_name(feat)}__stacked.png"
+    # Combined 2x2 panel for key overlay features (age, gender, country_work, work_position)
+    panel_feats = ["age", "gender", "country_work", "work_position"]
+    if all(f in df.columns for f in panel_feats):
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+        axes = axes.ravel()
 
-        if feat == "gender":
-            plot_categorical_stacked_by_cluster(
-                series=s, labels=labels_aligned,
-                title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-                out_path=out, category_order=GENDER_TARGET_ORDER, legend_title="Answer"
-            )
-            continue
-
-        if feat == "age":
-            plot_categorical_stacked_by_cluster(
-                series=s, labels=labels_aligned,
-                title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-                out_path=out, category_order=AGE_LABELS + ["NA"], legend_title="Answer"
-            )
-            continue
-
-        if feat == "country_live":
-            region_order = [
-                "US", "Canada", "UK", "European Union", "Other Europe",
-                "Asia", "Middle East", "Oceania", "Latin America & Caribbean", "Africa", "Other/NA"
-            ]
-            plot_categorical_stacked_by_cluster(
-                series=s, labels=labels_aligned,
-                title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-                out_path=out, category_order=region_order, legend_title="Answer"
-            )
-            continue
-
-        if feat == "med_pro_condition":
-            plot_categorical_stacked_by_cluster(
-                series=s, labels=labels_aligned,
-                title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-                out_path=out, category_order=MED_GROUPS_ORDER, legend_title="Answer"
-            )
-            continue
-
-        if feat == "work_position":
-            plot_categorical_stacked_by_cluster(
-                series=s, labels=labels_aligned,
-                title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-                out_path=out, category_order=WORK_ORDER, legend_title="Answer"
-            )
-            continue
-
-        # Default: high-cardinality features -> keep top categories and group rest into Other
+        # age
         plot_categorical_stacked_by_cluster(
-            series=s, labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): {feat}",
-            out_path=out, legend_title="Answer",
-            max_categories=15, min_prop_to_keep=0.01
+            series=df["age"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): age",
+            out_path=None,
+            category_order=AGE_LABELS + ["NA"],
+            legend_title="Answer",
+            ax=axes[0],
         )
 
-    print("Done.")
+        # gender
+        plot_categorical_stacked_by_cluster(
+            series=df["gender"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): gender",
+            out_path=None,
+            category_order=GENDER_TARGET_ORDER,
+            legend_title="Answer",
+            ax=axes[1],
+        )
+
+        # country_work (use top categories + Other)
+        plot_categorical_stacked_by_cluster(
+            series=df["country_work"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): country_work",
+            out_path=None,
+            legend_title="Answer",
+            max_categories=15,
+            min_prop_to_keep=0.01,
+            ax=axes[2],
+        )
+
+        # work_position
+        plot_categorical_stacked_by_cluster(
+            series=df["work_position"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): work_position",
+            out_path=None,
+            category_order=WORK_ORDER,
+            legend_title="Answer",
+            ax=axes[3],
+        )
+
+        panel_path = args.outdir / f"overlay_k{args.k}_panel_age_gender_country_work_position.png"
+        plt.tight_layout()
+        plt.savefig(panel_path, bbox_inches="tight")
+        try:
+            from IPython.display import Image, display
+            # overlay panel display message removed
+            display(Image(filename=str(panel_path)))
+        except Exception:
+            pass
+        plt.close()
+    else:
+        missing = [f for f in panel_feats if f not in df.columns]
+        print(f"Skipping overlay panel (missing columns: {missing})")
+
+    # Combined 2x2 panel for key overlay features (mhd_past, current_mhd, pro_treatment, no_treat_mhd_bad_work)
+    panel_feats = ["mhd_past", "current_mhd", "pro_treatment", "no_treat_mhd_bad_work"]
+    if all(f in df.columns for f in panel_feats):
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+        axes = axes.ravel()
+
+        # mhd_past
+        plot_categorical_stacked_by_cluster(
+            series=df["mhd_past"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): mhd_past",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[0],
+        )
+
+        # current_mhd
+        plot_categorical_stacked_by_cluster(
+            series=df["current_mhd"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): current_mhd",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[1],
+        )
+
+        # pro_treatment
+        plot_categorical_stacked_by_cluster(
+            series=df["pro_treatment"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): pro_treatment",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[2],
+        )
+
+        # no_treat_mhd_bad_work
+        plot_categorical_stacked_by_cluster(
+            series=df["no_treat_mhd_bad_work"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): no_treat_mhd_bad_work",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[3],
+        )
+
+        panel_path = args.outdir / f"overlay_k{args.k}_panel_mhd_past_current_mhd_pro_treatment_no_treat_mhd_bad_work.png"
+        plt.tight_layout()
+        plt.savefig(panel_path, bbox_inches="tight")
+        try:
+            from IPython.display import Image, display
+            # overlay panel display message removed
+            display(Image(filename=str(panel_path)))
+        except Exception:
+            pass
+        plt.close()
+    else:
+        missing = [f for f in panel_feats if f not in df.columns]
+        print(f"Skipping overlay panel (missing columns: {missing})")
+
+    # Combined 2x2 panel for key overlay features (mhd_hurt_career, coworkers_view_neg_mhd, med_pro_condition, mhd_by_med_pro)
+    panel_feats = ["mhd_hurt_career", "coworkers_view_neg_mhd", "med_pro_condition", "mhd_by_med_pro"]
+    if all(f in df.columns for f in panel_feats):
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+        axes = axes.ravel()
+
+        # mhd_hurt_career
+        plot_categorical_stacked_by_cluster(
+            series=df["mhd_hurt_career"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): mhd_hurt_career",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[0],
+        )
+
+        # coworkers_view_neg_mhd
+        plot_categorical_stacked_by_cluster(
+            series=df["coworkers_view_neg_mhd"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): coworkers_view_neg_mhd",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[1],
+        )
+
+        # med_pro_condition (uses recoded categories)
+        plot_categorical_stacked_by_cluster(
+            series=df["med_pro_condition"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): med_pro_condition",
+            out_path=None,
+            category_order=MED_GROUPS_ORDER,
+            legend_title="Answer",
+            ax=axes[2],
+        )
+
+        # mhd_by_med_pro
+        plot_categorical_stacked_by_cluster(
+            series=df["mhd_by_med_pro"],
+            labels=labels_aligned,
+            title=f"Overlay distribution by cluster (k={args.k}): mhd_by_med_pro",
+            out_path=None,
+            legend_title="Answer",
+            ax=axes[3],
+        )
+
+        panel_path = args.outdir / f"overlay_k{args.k}_panel_mhd_hurt_career_coworkers_view_neg_mhd_med_pro_condition_mhd_by_med_pro.png"
+        plt.tight_layout()
+        plt.savefig(panel_path, bbox_inches="tight")
+        try:
+            from IPython.display import Image, display
+            # overlay panel display message removed
+            display(Image(filename=str(panel_path)))
+        except Exception:
+            pass
+        plt.close()
+    else:
+        missing = [f for f in panel_feats if f not in df.columns]
+        print(f"Skipping overlay panel (missing columns: {missing})")
+
+    # Dominant answer table for key overlay features (with percentages)
+    dom_feats = ["mhd_by_med_pro", "pro_treatment", "mhd_past", "current_mhd", "med_pro_condition"]
+    if all(f in df.columns for f in dom_feats):
+        dom_df = dominant_answer_table(df, labels_aligned, dom_feats)
+        try:
+            from IPython.display import display, HTML
+            display(HTML("<b>Dominant answers (overlays)</b>" + dom_df.to_html(index=False)))
+        except Exception:
+            print(dom_df.to_string(index=False))
+
+    # Cluster × Answer percentage tables for selected overlay features
+    pct_feats = ["no_treat_mhd_bad_work", "mhd_hurt_career", "coworkers_view_neg_mhd"]
+    for feat in pct_feats:
+        if feat not in df.columns:
+            continue
+        pct_df = cluster_answer_pct_table(df[feat], labels_aligned)
+        try:
+            from IPython.display import display, HTML
+            display(HTML(f"<b>{feat}</b>" + pct_df.to_html(index=False)))
+        except Exception:
+            print(pct_df.to_string(index=False))
+
+    # done message removed
 
 
 # Override parse_args to avoid notebook argv issues
