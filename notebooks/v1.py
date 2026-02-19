@@ -2066,6 +2066,105 @@ def main() -> None:
     # no extra console summary
 main()
 
+#% 07B UMAP Visual
+# pam_umap_k6.py
+
+from umap import UMAP
+
+
+UMAP_PAM_DIR = PROJECT_ROOT / "data" / "out" / "pam"
+UMAP_OUT_DIR = PROJECT_ROOT / "data" / "out" / "pam_post"
+UMAP_OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+UMAP_GOWER_PATH = PROJECT_ROOT / "data" / "out" / "drivers_gower.npy"
+UMAP_LABELS_PATH = UMAP_PAM_DIR / "pam_labels_k6.npy"
+
+
+def load_umap_gower_precomputed() -> np.ndarray:
+    if not UMAP_GOWER_PATH.exists():
+        raise FileNotFoundError(f"Missing Gower distance matrix: {UMAP_GOWER_PATH}")
+    D = np.load(UMAP_GOWER_PATH)
+    if D.ndim != 2 or D.shape[0] != D.shape[1]:
+        raise ValueError(f"Expected square distance matrix, got shape {D.shape}")
+    return D.astype(float)
+
+
+def load_umap_labels_k6() -> np.ndarray:
+    if not UMAP_LABELS_PATH.exists():
+        raise FileNotFoundError(f"Missing labels file: {UMAP_LABELS_PATH}")
+    labels = np.load(UMAP_LABELS_PATH).astype(int)
+    if labels.ndim != 1:
+        raise ValueError(f"Expected 1D labels, got shape {labels.shape}")
+    return labels
+
+
+def fit_umap_precomputed_gower_2d(
+    D: np.ndarray,
+    n_neighbors: int = 12,
+    min_dist: float = 0.0,
+    spread: float = 2.0,
+    random_state: int = 42,
+) -> np.ndarray:
+    reducer = UMAP(
+        n_components=2,
+        metric="precomputed",
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        spread=spread,
+        random_state=random_state,
+    )
+    emb = reducer.fit_transform(D)
+    if emb.shape != (D.shape[0], 2):
+        raise ValueError(f"Unexpected UMAP embedding shape: {emb.shape}, expected {(D.shape[0], 2)}")
+    return emb
+
+
+def plot_umap_2d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+    clusts = np.unique(labels)
+
+    plt.figure(figsize=(10, 7), dpi=150)
+    for c in clusts:
+        mask = labels == c
+        plt.scatter(embedding[mask, 0], embedding[mask, 1], s=10, alpha=0.8, label=f"Cluster {c}")
+
+    plt.xlabel("UMAP1")
+    plt.ylabel("UMAP2")
+    plt.title("UMAP (precomputed Gower) – k=6 clusters (2D)")
+    plt.legend(markerscale=1.5, frameon=False)
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
+
+
+def run_umap_k6_2d() -> np.ndarray:
+    D = load_umap_gower_precomputed()
+    labels = load_umap_labels_k6()
+
+    if D.shape[0] != labels.shape[0]:
+        raise ValueError(f"Row mismatch: D is {D.shape[0]}x{D.shape[1]} but labels has {labels.shape[0]}")
+
+    emb = fit_umap_precomputed_gower_2d(
+        D=D,
+        n_neighbors=12,
+        min_dist=0.0,
+        spread=2.0,
+        random_state=42,
+    )
+
+    out2d = UMAP_OUT_DIR / "umap_gower_k6_2d.png"
+    plot_umap_2d(emb, labels, out2d)
+
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=str(out2d)))
+    except Exception:
+        pass
+
+    return emb
+
+
+UMAP_EMBEDDING_2D = run_umap_k6_2d()
+
 #% 08 Post-Cluster Validate
 # pam_post_validate.py
 
