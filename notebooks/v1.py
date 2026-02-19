@@ -1,4 +1,8 @@
-#%% 00 Config
+#%% [markdown]
+# ### 0. Setup
+# Project imports, plotting conventions, and file-system paths used throughout the analysis are specified.
+
+#%% 00 Setup
 
 from pathlib import Path
 
@@ -10,7 +14,6 @@ import json
 import re
 import warnings
 from itertools import combinations
-from typing import Callable, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -24,7 +27,25 @@ from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_
 from sklearn_extra.cluster import KMedoids
 from umap import UMAP
 
-#%% 01 Rename Columns
+pd.set_option("display.max_columns", 200)
+pd.set_option("display.width", 160)
+plt.rcParams.update({
+    "figure.dpi": 140,
+    "savefig.dpi": 180,
+    "axes.titlesize": 11,
+    "axes.labelsize": 10,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "patch.force_edgecolor": False,
+    "patch.edgecolor": "none",
+    "patch.linewidth": 0.0,
+})
+
+#%% [markdown]
+# ### 1. Data Load + Column Rename
+# Raw survey data are ingested, long questionnaire fields are mapped to shortened names, and a normalized column set is written.
+
+#%% 01 Data Load + Column Rename
 
 RAW_PATH = PROJECT_ROOT / "data" / "raw" / "survey.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
@@ -101,9 +122,13 @@ rename_map = {
 df_renamed = df.rename(columns=rename_map)
 df_renamed.to_csv(OUT_PATH, index=False)
 
-#%% 02 Cleaning + Drivers + Overlays
+#%% [markdown]
+# ### 2. Population Filtering
+# The target population is defined and filtering criteria for analytical inclusion/exclusion are applied.
 
-def _log_change(step: str, before: pd.DataFrame, after: pd.DataFrame) -> None:
+#%% 02 Cohort Definition - Helpers
+
+def _log_change(step, before, after):
     """
     Print a single summary line: rows removed, cols removed, and shapes.
     """
@@ -113,7 +138,7 @@ def _log_change(step: str, before: pd.DataFrame, after: pd.DataFrame) -> None:
           f"(shape {before.shape} -> {after.shape})")
 
 
-def filter_not_self_employed(df: pd.DataFrame) -> pd.DataFrame:
+def filter_not_self_employed(df):
     """
     Step 1:
     - Remove respondents who ARE self-employed (self_employed == 1)
@@ -133,7 +158,7 @@ def filter_not_self_employed(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 
-def filter_tech_role(df: pd.DataFrame) -> pd.DataFrame:
+def filter_tech_role(df):
     """
     Step 2:
     - Remove respondents whose role is explicitly NOT tech-related.
@@ -172,23 +197,11 @@ def filter_tech_role(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 
-def clean_population_filters(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply your two population filters in order:
-      1) filter_not_self_employed
-      2) filter_tech_role  (keeps Yes + missing, removes only explicit No)
-    """
-    df1 = filter_not_self_employed(df)
-    df2 = filter_tech_role(df1)
-    return df2
-
-
-
 NA_TOKEN = "Not applicable"
 
 _MISSING_STRINGS = {"nan", "na", "n/a", "null", "none", "<na>", "<nan>", ""}
 
-def canonicalize_true_missing(df: pd.DataFrame) -> pd.DataFrame:
+def canonicalize_true_missing(df):
     """
     Convert textual/blank missing values to real np.nan, without touching NA_TOKEN.
     """
@@ -210,7 +223,7 @@ def canonicalize_true_missing(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 
-def apply_driver_skip_logic(df: pd.DataFrame) -> pd.DataFrame:
+def apply_driver_skip_logic(df):
     """
     Fix structural missingness (skip-logic) by filling NAs with 'Not applicable'
     when the parent condition indicates the question did not apply.
@@ -268,7 +281,7 @@ def apply_driver_skip_logic(df: pd.DataFrame) -> pd.DataFrame:
     df2 = standardize_binary_drivers(df2)
     return df2
 
-def standardize_binary_drivers(df: pd.DataFrame) -> pd.DataFrame:
+def standardize_binary_drivers(df):
     """
     Standardize known binary driver features to consistent 0/1 numeric encoding.
 
@@ -328,12 +341,7 @@ OVERLAY_COLS = [
     "no_treat_mhd_bad_work",
 ]
 
-def extract_overlays(df: pd.DataFrame) -> pd.DataFrame:
-    # keep only columns that actually exist (safe)
-    cols = [c for c in OVERLAY_COLS if c in df.columns]
-    return df[cols].copy()
-
-def show_table(df: pd.DataFrame, title: str, max_rows: int = 25, figsize=(12, 6), dpi=150) -> None:
+def show_table(df, title, max_rows=25, figsize=(12, 6), dpi=150):
     if df is None or df.empty:
         print(f"[show_table] '{title}': nothing to show (empty).")
         return
@@ -364,7 +372,7 @@ def show_table(df: pd.DataFrame, title: str, max_rows: int = 25, figsize=(12, 6)
 IN_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
 
 
-#%% 02A Load + Population Filters
+#%% 02A Cohort Definition - Apply Filters
 # 1) Load renamed dataset
 df = pd.read_csv(IN_PATH)
 
@@ -390,12 +398,12 @@ n_subset = len(subset)
 print("\nCheck consistency:")
 print("Rows where tech_company == 0:", n_non_tech_company)
 print("Rows where tech_company == 0 AND tech_role == 1:", n_tech_role_yes)
-# subset size and boolean summary output removed
 
 # ---------------------------------------------------------------------
 # Main cleaning pipeline (drops self_employed and tech_role)
 # ---------------------------------------------------------------------
-df_clean = clean_population_filters(df)
+df_clean = filter_not_self_employed(df)
+df_clean = filter_tech_role(df_clean)
 
 # -----------------------------
 # Add respondent ID (stable row-based)
@@ -405,7 +413,11 @@ df_clean = df_clean.reset_index(drop=True)
 df_clean.insert(0, "respondent_id", range(1, len(df_clean) + 1))
 
 
-#%% 02B Row Missingness Summary
+#%% [markdown]
+# ### 3. Data Cleaning + Missingness
+# Applying cleaning and reviewing missingness patterns before constructing modeling features.
+
+#%% 03A Data Cleaning + Missingness Summary
 # ---------------------------------------------------------------------
 # Row missingness: summary + histogram
 # ---------------------------------------------------------------------
@@ -415,7 +427,7 @@ summary = (row_miss.describe()[["min", "max"]] * 100).round(1)
 summary.index = ["min", "max"]
 display(summary.to_frame(name="Row missingness (%)"))
 
-#%% 02C Row Missingness Histogram
+#%% 03B Row Missingness Histogram
 plt.figure(figsize=(8, 5), dpi=150)
 plt.hist(row_miss, bins=20)
 plt.xlabel("Fraction missing per row")
@@ -443,10 +455,10 @@ top15 = miss_table.head(15).copy()
 # Format % nicely for printing
 top15["missing_percent"] = top15["missing_percent"].map(lambda x: f"{x:.2f}%")
 
-#%% 02D Column Missingness Table
+#%% 03C Column Missingness Table
 display(HTML(top15.to_html(index=False)))
 
-#%% 02E Column Missingness Histogram
+#%% 03D Column Missingness Histogram
 # Histogram of column missingness (fractions)
 col_miss = df_clean.isna().mean()
 plt.figure(figsize=(8, 5), dpi=150)
@@ -457,7 +469,7 @@ plt.title("Column missingness distribution")
 plt.tight_layout()
 plt.show()
 
-#%% 02F Column Missingness Feature Bars
+#%% 03E Column Missingness Feature Bars
 # Bar plot: missingness per feature (sorted) — only features with missingness
 col_miss_sorted = col_miss[col_miss > 0].sort_values(ascending=False)
 plt.figure(figsize=(10, 6), dpi=150)
@@ -486,7 +498,8 @@ print(
 # ---------------------------------------------------------------------
 # Extract overlays (now guaranteed to include respondent_id)
 # ---------------------------------------------------------------------
-df_overlays = extract_overlays(df_clean)
+overlay_cols = [c for c in OVERLAY_COLS if c in df_clean.columns]
+df_overlays = df_clean[overlay_cols].copy()
 
 # Force respondent_id to exist in overlays even if something changes later
 if "respondent_id" not in df_overlays.columns:
@@ -532,7 +545,11 @@ stats_suffix = f" | stats: {'; '.join(drop_stats)}" if drop_stats else ""
 print(f"Dropped open-ended features: {drop_present}{stats_suffix}")
 print("Drivers shape now:", df_drivers.shape)
 
-#%% 02G Driver Audit Table
+#%% [markdown]
+# ### 4. Driver/Overlay Split
+# Clustering driver variables are separated from interpretive overlay variables, followed by an audit of feature quality.
+
+#%% 04A Driver/Overlay Split - Driver Audit
 # ---------------------------------------------------------------------
 # DRIVER AUDIT TABLE (structure + missingness)
 # ---------------------------------------------------------------------
@@ -566,7 +583,6 @@ for c in df_drivers.columns:
 
 audit_df = pd.DataFrame(rows).sort_values("% missing", ascending=False).reset_index(drop=True)
 
-# Show only features with any missingness (matches requested view) as text table
 audit_missing = audit_df[audit_df["% missing"] > 0].reset_index(drop=True)
 display(HTML(audit_missing.to_html(index=False)))
 
@@ -586,7 +602,6 @@ for i in range(len(cols)):
 
 corr_pairs_df = pd.DataFrame(pairs).sort_values("corr", ascending=False).reset_index(drop=True)
 
-# Strong missingness-correlation pairs table removed per request
 
 # Contingency table for benefits and mh_options_known
 
@@ -616,7 +631,7 @@ full_ct = pd.crosstab(
     dropna=False
 )
 
-#%% 02H Skip-Logic Contingency Tables
+#%% 04B Driver/Overlay Split - Skip-Logic Checks
 display(HTML("<b>Contingency table (raw)</b>" + full_ct.to_html()))
 
 # apply parent-child question changes
@@ -639,7 +654,7 @@ display(HTML("<b>Contingency table (after Rule C)</b>" + ct_after.to_html()))
 NA_TOKEN = "Not applicable"
 
 # ---------- Helper to compute proof metrics ----------
-def _rule_metrics(rule_name: str, parent_mask_false: pd.Series, child: pd.Series) -> dict:
+def _rule_metrics(rule_name, parent_mask_false, child):
     n_false = int(parent_mask_false.sum())
     na = int((parent_mask_false & (child == NA_TOKEN)).sum())
     nan = int((parent_mask_false & child.isna()).sum())
@@ -764,7 +779,7 @@ else:
             figsize=(12, 2.5)
         )
 
-#%% 02I Feature Type Audit
+#%% 04C Driver/Overlay Split - Feature Type Audit
 # ============================================================
 # Handle TRUE missingness after structural skip-logic
 # ============================================================
@@ -814,13 +829,11 @@ for col in binary_cols:
         df_drivers[col] = df_drivers[col].astype(int)
 
 # AFTER: confirm binaries are now int 0/1
-# binary check prints removed
 
 # ============================================================
 # POST-FIX VALIDATION CHECKS
 # ============================================================
 
-# POST-FIX VALIDATION prints removed by request
 
 # feature type audit
 pd.set_option("display.max_colwidth", None)
@@ -859,11 +872,14 @@ display(HTML(audit_table.to_html(index=False)))
 out_path = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
 out_path.parent.mkdir(parents=True, exist_ok=True)
 df_drivers.to_csv(out_path, index=False)
-# saved drivers message removed
 
 
 
-#%% 03 Encoding
+#%% [markdown]
+# ### 5. Encoding
+# Cleaned survey responses are encoded into numeric feature representations suitable for distance-based clustering.
+
+#%% 05 Encoding
 
 IN_PATH = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
@@ -883,7 +899,7 @@ def norm_str(x):
     return str(x).strip()
 
 
-def encode_ordinal(series: pd.Series, mapping: dict, name: str) -> pd.Series:
+def encode_ordinal(series, mapping, name):
     """
     Encode an ordinal feature using an explicit mapping (text -> number).
     Preserves NaN. Raises if any non-NaN category is unmapped.
@@ -917,7 +933,7 @@ ORDINAL_MAPS = {
 }
 
 
-def encode_company_size(series: pd.Series) -> pd.Series:
+def encode_company_size(series):
     """
     Robust company_size encoding:
     - If numeric-coded (1..6), validate and return.
@@ -931,17 +947,8 @@ def encode_company_size(series: pd.Series) -> pd.Series:
 
 
 # ==========================================================
-# MIXED ENCODING (v1) — HISTORY (ordinal + NA/IDK flags only)
 # ==========================================================
-def encode_mixed_ord_plus_flags(
-    df: pd.DataFrame,
-    feature: str,
-    ord_mapping: dict,
-    na_tokens: set | None = None,
-    idk_tokens: set | None = None,
-    collapse_map: dict | None = None,
-    drop_all_zero_flags: bool = True,
-) -> pd.DataFrame:
+def encode_mixed_ord_plus_flags(df, feature, ord_mapping, na_tokens=None, idk_tokens=None, collapse_map=None, drop_all_zero_flags=True):
     """
     Mixed (v1) = ordinal column + optional indicator columns for special categories.
 
@@ -992,7 +999,6 @@ def encode_mixed_ord_plus_flags(
 
 
 # -------------------
-# MIXED (v1) SPECS (7 features) — already working
 # -------------------
 MIXED_SPECS = {
     "friends_family_mhd_comfort": {
@@ -1069,18 +1075,17 @@ MIXED_SPECS = {
 
 
 # ==========================================================
-# MIXED ENCODING (v2) — NEW (ordinal + multiple nominal flags)
 # ==========================================================
 def encode_mixed_ord_plus_flags_v2(
-    df: pd.DataFrame,
-    feature: str,
-    ord_mapping: dict,
-    na_tokens: set | None = None,
-    idk_tokens: set | None = None,
-    extra_flag_tokens: dict | None = None,  # {"No response": "__no_response", ...}
-    collapse_map: dict | None = None,
-    drop_all_zero_flags: bool = True,
-) -> pd.DataFrame:
+    df,
+    feature,
+    ord_mapping,
+    na_tokens=None,
+    idk_tokens=None,
+    extra_flag_tokens=None,
+    collapse_map=None,
+    drop_all_zero_flags=True,
+):
     """
     Mixed (v2) = ordinal column + multiple binary flag columns (NA / IDK / other tokens).
 
@@ -1145,7 +1150,6 @@ def encode_mixed_ord_plus_flags_v2(
 
 
 # -------------------
-# NEW MIXED (v2) SPECS — “1 ordinal + 2 nominal” (and one case with 3 flags)
 # -------------------
 MIXED_SPECS_V2 = {
     # ordinal severity + uncertainty flag + nonresponse flag (2 nominal flags)
@@ -1214,7 +1218,6 @@ MIXED_SPECS_V2 = {
 
 df = pd.read_csv(IN_PATH)
 
-# input shape prints removed
 
 # -------------------
 # 1) Binary
@@ -1229,7 +1232,6 @@ out = pd.DataFrame({"respondent_id": df["respondent_id"]})
 for c in binary_cols:
     out[c] = df[c].astype(int)
 
-# after-binary prints removed
 
 # -------------------
 # 2) Nominal (one-hot)
@@ -1246,7 +1248,6 @@ nominal_cols = [
 ]
 nominal_cols = [c for c in nominal_cols if c in df.columns]
 
-# nominal input prints removed
 
 X_nom = df[nominal_cols].copy()
 X_nom = X_nom.fillna("NaN")
@@ -1255,16 +1256,13 @@ for c in nominal_cols:
 
 nom_dum = pd.get_dummies(X_nom, prefix=nominal_cols, prefix_sep="=")
 
-# nominal one-hot detail prints removed
 
 cols_before = out.shape[1]
 out = out.join(nom_dum)
-# after nominal prints removed
 
 # -------------------
 # 3) Ordinal
 # -------------------
-# ordinal input prints removed
 ordinal_cols = [
     "company_size",
     "remote_work",
@@ -1277,7 +1275,6 @@ ordinal_cols = [
 ]
 ordinal_cols = [c for c in ordinal_cols if c in df.columns]
 
-# ordinal input prints removed
 
 ord_out = pd.DataFrame(index=df.index)
 
@@ -1293,15 +1290,12 @@ for c in ordinal_cols:
 cols_before = out.shape[1]
 out = out.join(ord_out)
 
-# after ordinal prints removed
 
 # -------------------
 # 4) Mixed (v1): ordinal + (NA/IDK) flags
 # -------------------
-# mixed v1 input prints removed
 
 mixed_cols = [c for c in MIXED_SPECS.keys() if c in df.columns]
-# mixed v1 input prints removed
 
 mixed_out = pd.DataFrame(index=df.index)
 
@@ -1320,23 +1314,18 @@ for c in mixed_cols:
         drop_all_zero_flags=True,
     )
 
-    # mixed v1 detail prints removed
 
     mixed_out = mixed_out.join(enc_block)
 
 cols_before = out.shape[1]
 out = out.join(mixed_out)
 
-# after mixed v1 prints removed
 
 # -------------------
 # 5) Mixed (v2): ordinal + TWO nominal flags (plus optional extra flags)
-#     (inspected separately, as requested)
 # -------------------
-# mixed v2 input prints removed
 
 mixed_v2_cols = [c for c in MIXED_SPECS_V2.keys() if c in df.columns]
-# mixed v2 input prints removed
 
 mixed_v2_out = pd.DataFrame(index=df.index)
 
@@ -1356,14 +1345,12 @@ for c in mixed_v2_cols:
         drop_all_zero_flags=True,
     )
 
-    # mixed v2 detail prints removed
 
     mixed_v2_out = mixed_v2_out.join(enc_block)
 
 cols_before = out.shape[1]
 out = out.join(mixed_v2_out)
 
-# after mixed v2 prints removed
 
 # ----------------------------------------------------------
 # DROP LOW-INFORMATION FLAG COLUMNS
@@ -1411,14 +1398,17 @@ if bool_cols:
 
 
 
-# DO NOT DELETE BELOW
 OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 out.to_csv(OUT_PATH, index=False)
 
 
 
 
-#% 04 Compute Gower
+#%% [markdown]
+# ### 6. Gower Distance
+# A missingness-aware pairwise distance matrix is computed for subsequent PAM clustering.
+
+#%% 06 Gower Distance
 
 
 IN_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
@@ -1426,7 +1416,7 @@ OUT_NPY = PROJECT_ROOT / "data" / "out" / "drivers_gower.npy"
 OUT_META = PROJECT_ROOT / "data" / "out" / "drivers_gower_meta.json"
 
 
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def sha256_file(path, chunk_size=1024 * 1024):
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -1437,11 +1427,7 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-def compute_gower_numeric_with_missing(
-    X: np.ndarray,
-    feature_ranges: np.ndarray,
-    block_size: int = 256,
-) -> np.ndarray:
+def compute_gower_numeric_with_missing(X, feature_ranges, block_size=256):
     """
     Numeric-only Gower distance WITH missing values (NaN) supported.
 
@@ -1575,13 +1561,16 @@ if not skip_gower_compute:
     }
     OUT_META.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    # saved output message removed
     print("Saved metadata:", OUT_META)
 
 
 
 
-#% 05 PAM
+#%% [markdown]
+# ### 7. PAM + k Selection
+# k-medoids (PAM) solutions are fit across candidate k values, and silhouette and cluster-size diagnostics are reviewed.
+
+#%% 07 PAM + k Selection
 
 # ==========================================================
 # PAM (K-MEDOIDS) ON PRECOMPUTED GOWER DISTANCES
@@ -1596,13 +1585,13 @@ K_LIST = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 RANDOM_STATE = 42
 
 
-def validate_distance_matrix(D: np.ndarray) -> None:
+def validate_distance_matrix(D):
     # Gower is typically in [0, 1], but do not hard-fail if scaling differs slightly.
     if np.max(D) > 1.0 + 1e-6:
         print(f"WARNING: max(D)={np.max(D):.6f} > 1.0. If you expected Gower, verify scaling.")
 
 
-def run_pam(D: np.ndarray, k: int) -> dict:
+def run_pam(D, k):
     model = KMedoids(
         n_clusters=k,
         metric="precomputed",
@@ -1634,7 +1623,7 @@ def run_pam(D: np.ndarray, k: int) -> dict:
 
 # visualization (minimal, standard, no annotations)
 
-def _plot_silhouette_vs_k(df: pd.DataFrame, out_path: Path) -> None:
+def _plot_silhouette_vs_k(df, out_path):
     ks = df["k"].to_numpy(dtype=int)
     sil = df["silhouette_avg"].to_numpy(dtype=float)
 
@@ -1651,7 +1640,7 @@ def _plot_silhouette_vs_k(df: pd.DataFrame, out_path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_cluster_sizes_by_k(df: pd.DataFrame, out_path: Path) -> None:
+def _plot_cluster_sizes_by_k(df, out_path):
     ks = df["k"].tolist()
     size_lists = df["cluster_sizes"].tolist()
 
@@ -1695,29 +1684,31 @@ df_table = df_table.rename(columns={
 })
 df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]] = df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]].round(4)
 
-#%% 05A PAM Summary Table
+#%% 07A PAM Summary Table
 display(HTML(df_table.to_html(index=False)))
 
 # ----------------------------
-# V2 visuals
 # ----------------------------
 sil_plot_path = OUT_DIR / "silhouette_vs_k.png"
 _plot_silhouette_vs_k(df, sil_plot_path)
 
-#%% 05B Silhouette Plot
+#%% 07B Silhouette Plot
 display(Image(filename=str(sil_plot_path)))
 
 size_plot_path = OUT_DIR / "cluster_sizes_by_k.png"
 _plot_cluster_sizes_by_k(df, size_plot_path)
 
-#%% 05C Cluster Size Plot
+#%% 07C Cluster Size Plot
 display(Image(filename=str(size_plot_path)))
 
 
 
 
-#% 07 PCoA Visual
-# pam_pcoa_k6.py
+#%% [markdown]
+# ### 8. Embeddings (PCoA/UMAP)
+# The clustered distance structure is summarized using low-dimensional embeddings for visualization.
+
+#%% 08A Embeddings - PCoA
 
 
 
@@ -1731,20 +1722,7 @@ K = 6
 LABELS_PATH = PAM_DIR / f"pam_labels_k{K}.npy"
 
 
-def load_gower() -> np.ndarray:
-    D = np.load(GOWER_PATH)
-    # force symmetry (numerical safety)
-    D = 0.5 * (D + D.T)
-    np.fill_diagonal(D, 0.0)
-    return D.astype(float)
-
-
-def load_labels() -> np.ndarray:
-    lab = np.load(LABELS_PATH).astype(int)
-    return lab
-
-
-def pcoa(D: np.ndarray, n_components: int = 3) -> tuple[np.ndarray, np.ndarray]:
+def pcoa(D, n_components=3):
     """
     Principal Coordinates Analysis (PCoA) / Classical MDS.
 
@@ -1755,7 +1733,7 @@ def pcoa(D: np.ndarray, n_components: int = 3) -> tuple[np.ndarray, np.ndarray]:
       4) Coordinates = V * sqrt(Lambda) for positive eigenvalues only
 
     Returns:
-      coords: (n, m) array for m = min(n_components, #positive eigenvalues)
+      coords = min(n_components, #positive eigenvalues)
       explained: (m,) fraction of total positive eigenvalue mass
     """
     n = D.shape[0]
@@ -1790,7 +1768,7 @@ def pcoa(D: np.ndarray, n_components: int = 3) -> tuple[np.ndarray, np.ndarray]:
     return coords, explained
 
 
-def plot_pcoa_2d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+def plot_pcoa_2d(coords, explained, labels, save_path):
     x = coords[:, 0]
     y = coords[:, 1]
     clusts = np.unique(labels)
@@ -1811,7 +1789,7 @@ def plot_pcoa_2d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, 
     plt.close()
 
 
-def plot_pcoa_3d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+def plot_pcoa_3d(coords, explained, labels, save_path):
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
@@ -1846,8 +1824,10 @@ def plot_pcoa_3d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, 
     plt.close(fig)
 
 
-D = load_gower()
-labels = load_labels()
+D = np.load(GOWER_PATH).astype(float)
+D = 0.5 * (D + D.T)
+np.fill_diagonal(D, 0.0)
+labels = np.load(LABELS_PATH).astype(int)
 
 # Need at least 2D for the 2D plot; ask for 3, but handle if only 2 available
 coords, explained = pcoa(D, n_components=3)
@@ -1856,10 +1836,10 @@ coords, explained = pcoa(D, n_components=3)
 out2d = OUT_DIR / "pcoa_gower_k6_2d.png"
 plot_pcoa_2d(coords[:, :2], explained[:2], labels, out2d)
 
-#%% 07A PCoA 2D Display
+#%% 08A1 PCoA 2D
 display(Image(filename=str(out2d)))
 
-#%% 07B PCoA 3D Display
+#%% 08A2 PCoA 3D
 # 3D
 if coords.shape[1] >= 3:
     out3d = OUT_DIR / "pcoa_gower_k6_3d.png"
@@ -1868,10 +1848,8 @@ if coords.shape[1] >= 3:
 else:
     print("PCoA returned only 2 positive components; 3D plot skipped.")
 
-    # no extra console summary
 
-#%% 07B UMAP Visual
-# pam_umap_k6.py
+#%% 08B Embeddings - UMAP
 
 
 
@@ -1883,24 +1861,7 @@ UMAP_GOWER_PATH = PROJECT_ROOT / "data" / "out" / "drivers_gower.npy"
 UMAP_LABELS_PATH = UMAP_PAM_DIR / "pam_labels_k6.npy"
 
 
-def load_umap_gower_precomputed() -> np.ndarray:
-    D = np.load(UMAP_GOWER_PATH)
-    return D.astype(float)
-
-
-def load_umap_labels_k6() -> np.ndarray:
-    labels = np.load(UMAP_LABELS_PATH).astype(int)
-    return labels
-
-
-def fit_umap_precomputed_gower(
-    D: np.ndarray,
-    n_components: int = 2,
-    n_neighbors: int = 6,
-    min_dist: float = 0.5,
-    random_state: int = 42,
-    spread: float = 2,
-) -> np.ndarray:
+def fit_umap_precomputed_gower(D, n_components=2, n_neighbors=6, min_dist=0.5, random_state=42, spread=2):
     reducer = UMAP(
         n_components=n_components,
         metric="precomputed",
@@ -1927,7 +1888,7 @@ def fit_umap_precomputed_gower(
     return emb
 
 
-def plot_umap_2d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+def plot_umap_2d(embedding, labels, save_path):
     clusts = np.unique(labels)
 
     plt.figure(figsize=(10, 7), dpi=150)
@@ -1944,7 +1905,7 @@ def plot_umap_2d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> 
     plt.close()
 
 
-def plot_umap_3d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+def plot_umap_3d(embedding, labels, save_path):
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     clusts = np.unique(labels)
@@ -1971,32 +1932,26 @@ def plot_umap_3d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> 
     plt.close(fig)
 
 
-def run_umap_k6() -> tuple[np.ndarray, np.ndarray]:
-    D = load_umap_gower_precomputed()
-    labels = load_umap_labels_k6()
+UMAP_D = np.load(UMAP_GOWER_PATH).astype(float)
+UMAP_LABELS = np.load(UMAP_LABELS_PATH).astype(int)
+UMAP_EMBEDDING_2D = fit_umap_precomputed_gower(D=UMAP_D, n_components=2)
+UMAP_EMBEDDING_3D = fit_umap_precomputed_gower(D=UMAP_D, n_components=3)
 
-    emb2d = fit_umap_precomputed_gower(D=D, n_components=2)
-    emb3d = fit_umap_precomputed_gower(D=D, n_components=3)
+umap_out2d = UMAP_OUT_DIR / "umap_gower_k6_2d.png"
+umap_out3d = UMAP_OUT_DIR / "umap_gower_k6_3d.png"
+plot_umap_2d(UMAP_EMBEDDING_2D, UMAP_LABELS, umap_out2d)
+plot_umap_3d(UMAP_EMBEDDING_3D, UMAP_LABELS, umap_out3d)
+display(Image(filename=str(umap_out2d)))
+display(Image(filename=str(umap_out3d)))
 
-    out2d = UMAP_OUT_DIR / "umap_gower_k6_2d.png"
-    out3d = UMAP_OUT_DIR / "umap_gower_k6_3d.png"
-    plot_umap_2d(emb2d, labels, out2d)
-    plot_umap_3d(emb3d, labels, out3d)
+#%% [markdown]
+# ### 9. Stability Validation
+# Robustness across neighboring k values is assessed using ARI, overlap statistics, and Sankey-style flow summaries.
 
-    display(Image(filename=str(out2d)))
-    display(Image(filename=str(out3d)))
-
-    return emb2d, emb3d
-
-
-UMAP_EMBEDDING_2D, UMAP_EMBEDDING_3D = run_umap_k6()
-
-#%% 08 Post-Cluster Validate
-# pam_post_validate.py
+#%% 09 Stability Validation
 
 
 
-# NEW: suppress Matplotlib deprecation spam + support panel plots
 
 
 # ==========================================================
@@ -2018,410 +1973,9 @@ SPLIT_THRESHOLD = 0.80
 # If you want row-wise metrics weighted by row sizes:
 WEIGHTED = True
 
-
-# ==========================================================
-# FEATURE IMPORTANCE HEATMAPS BY FEATURE TYPE
-# - Uses the same precomputed Gower distance matrix as PAM
-# - Evaluates k = 5, 6, 7
-#
-# Medoid selection:
-# - Uses the precomputed Gower distance matrix (drivers_gower.npy)
-#
-# Importance definitions:
-# - Ordinal/non-binary features:
-#     mean pairwise |medoid values| normalized by feature IQR on full dataset
-# - Binary features (including rare one-hot indicators):
-#     mean pairwise |medoid values| (no IQR normalization; scale naturally in [0,1])
-#
-# Visualization:
-# - Two separate heatmaps:
-#     1) Ordinal/non-binary heatmap (single consistent scale across k)
-#     2) Binary heatmap (fixed scale [0,1] across k)
-# - Rows sorted by importance at k=5 (descending) within each heatmap
-# - No clustering of rows/columns
-# ==========================================================
-
-GOWER_PATH = PROJECT_ROOT / "data" / "out" / "drivers_gower.npy"
-ENCODED_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
-FEATURE_IMPORTANCE_KS = [5, 6, 7]
-
-# NEW: how many features to include in the combined “panel” plots
-TOP_PANEL_N = 10
-
-
-def load_encoded_drivers() -> tuple[np.ndarray, list[str]]:
+def contingency_matrix(labels_from, labels_to):
     """
-    Load the final encoded dataset (observations × features).
-
-    Expected: numeric encoded matrix (standardized numeric and/or one-hot).
-    If respondent_id exists, it is dropped.
-    """
-    df = pd.read_csv(ENCODED_PATH)
-    if "respondent_id" in df.columns:
-        df = df.drop(columns=["respondent_id"])
-
-    X = df.apply(pd.to_numeric, errors="raise").to_numpy(dtype=float)
-    return X, df.columns.tolist()
-
-
-def compute_cluster_medoids_from_gower(D: np.ndarray, labels: np.ndarray) -> dict[int, int]:
-    """
-    Compute medoid indices for each cluster using the same precomputed Gower
-    distance matrix used by PAM (k-medoids).
-
-    Medoid definition: point minimizing the sum of distances to all other points
-    within its cluster (classic PAM medoid criterion).
-    """
-    medoids: dict[int, int] = {}
-    for c in np.unique(labels):
-        idx = np.flatnonzero(labels == c)
-        if idx.size == 0:
-            continue
-        if idx.size == 1:
-            medoids[int(c)] = int(idx[0])
-            continue
-
-        subD = D[np.ix_(idx, idx)]
-        sums = subD.sum(axis=1)
-        medoids[int(c)] = int(idx[int(np.argmin(sums))])
-    return medoids
-
-
-def mean_pairwise_abs_diff(values: np.ndarray) -> float:
-    """Mean pairwise absolute difference (upper triangle) for a 1D array."""
-    v = np.asarray(values, dtype=float)
-    v = v[np.isfinite(v)]
-    if v.size < 2:
-        return 0.0
-    diffs = [abs(a - b) for a, b in combinations(v.tolist(), 2)]
-    return float(np.mean(diffs)) if diffs else 0.0
-
-
-def split_feature_types(X: np.ndarray, feature_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Split features into:
-      - binary: all finite values in {0,1} (including rare one-hot indicators)
-      - ordinal/non-binary: everything else
-
-    Returns:
-      (binary_mask, ordinal_mask) boolean arrays of length p
-    """
-    _, p = X.shape
-
-    binary_mask = np.zeros(p, dtype=bool)
-
-    for j in range(p):
-        col = X[:, j]
-        col = col[np.isfinite(col)]
-        if col.size == 0:
-            # Treat fully-missing columns as non-binary (keeps them out of binary heatmap)
-            binary_mask[j] = False
-            continue
-        uniq = np.unique(col)
-        # binary if subset of {0,1}
-        binary_mask[j] = np.all(np.isin(uniq, [0.0, 1.0]))
-
-    ordinal_mask = ~binary_mask
-    return binary_mask, ordinal_mask
-
-
-def compute_feature_importance_matrix_ordinal(
-    X: np.ndarray,
-    feature_names: list[str],
-    D: np.ndarray,
-    label_map: dict[int, np.ndarray],
-    ks: list[int],
-    ordinal_mask: np.ndarray,
-) -> pd.DataFrame:
-    """
-    Ordinal/non-binary feature importance:
-      mean pairwise |medoid values| normalized by IQR(feature) on full dataset
-    """
-    n, p = X.shape
-
-    Xo = X[:, ordinal_mask]
-    names_o = [feature_names[i] for i in np.flatnonzero(ordinal_mask)]
-
-    if Xo.shape[1] == 0:
-        return pd.DataFrame(index=[], columns=[f"k{k}" for k in ks], dtype=float)
-
-    q25 = np.nanpercentile(Xo, 25, axis=0)
-    q75 = np.nanpercentile(Xo, 75, axis=0)
-    iqr = q75 - q25
-
-    # if IQR is 0 or invalid, normalized importance is undefined -> NaN
-    iqr = np.where(np.isfinite(iqr) & (iqr > 0), iqr, np.nan)
-
-    out = pd.DataFrame(index=names_o, columns=[f"k{k}" for k in ks], dtype=float)
-
-    for k in ks:
-        labels = label_map[k]
-        medoid_idx = compute_cluster_medoids_from_gower(D, labels)
-        medoid_rows = np.array([medoid_idx[c] for c in sorted(medoid_idx.keys())], dtype=int)
-        medoid_vals = Xo[medoid_rows, :]
-
-        raw = np.array(
-            [mean_pairwise_abs_diff(medoid_vals[:, j]) for j in range(medoid_vals.shape[1])],
-            dtype=float,
-        )
-        out[f"k{k}"] = raw / iqr
-
-    return out
-
-
-def compute_feature_importance_matrix_binary(
-    X: np.ndarray,
-    feature_names: list[str],
-    D: np.ndarray,
-    label_map: dict[int, np.ndarray],
-    ks: list[int],
-    binary_mask: np.ndarray,
-) -> pd.DataFrame:
-    """
-    Binary feature importance (includes rare features):
-      mean pairwise |medoid values|, no IQR normalization
-    This stays interpretable for sparse one-hot columns and is naturally in [0,1].
-    """
-    n, p = X.shape
-
-    Xb = X[:, binary_mask]
-    names_b = [feature_names[i] for i in np.flatnonzero(binary_mask)]
-
-    if Xb.shape[1] == 0:
-        return pd.DataFrame(index=[], columns=[f"k{k}" for k in ks], dtype=float)
-
-    out = pd.DataFrame(index=names_b, columns=[f"k{k}" for k in ks], dtype=float)
-
-    for k in ks:
-        labels = label_map[k]
-        medoid_idx = compute_cluster_medoids_from_gower(D, labels)
-        medoid_rows = np.array([medoid_idx[c] for c in sorted(medoid_idx.keys())], dtype=int)
-        medoid_vals = Xb[medoid_rows, :]
-
-        raw = np.array(
-            [mean_pairwise_abs_diff(medoid_vals[:, j]) for j in range(medoid_vals.shape[1])],
-            dtype=float,
-        )
-        out[f"k{k}"] = raw
-
-    return out
-
-
-def plot_heatmap(
-    mat: pd.DataFrame,
-    save_path: Path,
-    title: str,
-    colorbar_label: str,
-    vmin: float | None = None,
-    vmax: float | None = None,
-) -> None:
-    """
-    Generic heatmap:
-      - sorts rows by k5 descending (if k5 exists)
-      - uses a single consistent color scale across all k in this heatmap
-      - does not cluster rows/columns
-    """
-    mat2 = mat.copy()
-    if "k5" in mat2.columns:
-        mat2 = mat2.sort_values("k5", ascending=False)
-
-    data = mat2.to_numpy(dtype=float)
-    finite = np.isfinite(data)
-    auto_vmin = float(np.nanmin(data)) if finite.any() else 0.0
-    auto_vmax = float(np.nanmax(data)) if finite.any() else 1.0
-
-    if vmin is None:
-        vmin = auto_vmin
-    if vmax is None:
-        vmax = auto_vmax
-
-    fig_h = max(6.0, 0.18 * mat2.shape[0])
-    fig_w = 7.0
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-    im = plt.imshow(data, aspect="auto", vmin=vmin, vmax=vmax)
-    plt.colorbar(im, label=colorbar_label)
-    plt.xticks(range(mat2.shape[1]), mat2.columns.tolist(), rotation=0)
-    plt.yticks(range(mat2.shape[0]), mat2.index.tolist(), fontsize=7)
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close()
-
-
-# ==========================================================
-# NEW: combined “panel” plots (rows=features, cols=k=5/6/7)
-# ==========================================================
-
-def _cluster_ids(labels: np.ndarray) -> list[int]:
-    return sorted(np.unique(labels).astype(int).tolist())
-
-
-def _add_left_row_titles(fig: plt.Figure, axes: np.ndarray, row_titles: list[str], fontsize: int = 8) -> None:
-    """
-    Add one left-side row title per row (outside the axes), aligned to the vertical
-    center of that row. Assumes axes is 2D: [nrows, ncols].
-    """
-    nrows = axes.shape[0]
-    for ridx in range(nrows):
-        # Use first column axis position to compute y center for the row
-        bbox = axes[ridx, 0].get_position()
-        y_mid = 0.5 * (bbox.y0 + bbox.y1)
-        # Place text slightly left of the subplot area (in figure coords)
-        fig.text(0.01, y_mid, row_titles[ridx], ha="left", va="center", fontsize=fontsize)
-
-
-def plot_panel_ordinal_boxplots_by_k(
-    X: np.ndarray,
-    feature_names: list[str],
-    label_map: dict[int, np.ndarray],
-    ks: list[int],
-    features: list[str],
-    save_path: Path,
-) -> None:
-    """
-    One figure:
-      rows = features
-      cols = ks (k5,k6,k7)
-      each cell = boxplot across clusters for that (feature, k)
-
-    UPDATED: Remove per-row y-axis labels and instead add one left-side row title
-    per feature (outside the axes) to avoid stacked y-label overlap.
-    """
-    nrows = len(features)
-    ncols = len(ks)
-
-    fig_w = 4.2 * ncols
-    fig_h = max(6.0, 0.75 * nrows)
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), dpi=150, squeeze=False)
-
-    for cidx, k in enumerate(ks):
-        labels = label_map[k]
-        clusts = _cluster_ids(labels)
-
-        for ridx, feat in enumerate(features):
-            ax = axes[ridx, cidx]
-            if feat not in feature_names:
-                ax.axis("off")
-                continue
-
-            j = feature_names.index(feat)
-            data_by_cluster = []
-            for c in clusts:
-                vals = X[labels == c, j]
-                vals = vals[np.isfinite(vals)]
-                data_by_cluster.append(vals)
-
-            ax.boxplot(
-                data_by_cluster,
-                tick_labels=[str(c) for c in clusts],  # modern name (no deprecation)
-                showfliers=False,
-            )
-
-            if ridx == 0:
-                ax.set_title(f"k{k}", fontsize=10)
-
-            # UPDATED: remove per-axis y-labels (feature names) to avoid overlap
-            ax.set_ylabel("")
-
-            if ridx != nrows - 1:
-                ax.set_xticklabels([])
-                ax.set_xlabel("")
-            else:
-                ax.set_xlabel("Cluster", fontsize=8)
-
-            ax.tick_params(axis="x", labelsize=7)
-            ax.tick_params(axis="y", labelsize=7)
-
-    fig.suptitle("Cluster-wise distributions (ordinal): top features across k", fontsize=12)
-
-    # UPDATED: create room for left-side row titles, then add them
-    fig.subplots_adjust(left=0.14)
-    _add_left_row_titles(fig, axes, features, fontsize=8)
-
-    plt.tight_layout(rect=[0.14, 0, 1, 0.98])
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_panel_binary_bars_by_k(
-    X: np.ndarray,
-    feature_names: list[str],
-    label_map: dict[int, np.ndarray],
-    ks: list[int],
-    features: list[str],
-    save_path: Path,
-) -> None:
-    """
-    One figure:
-      rows = features
-      cols = ks (k5,k6,k7)
-      each cell = bar chart of proportion(1) by cluster for that (feature, k)
-
-    UPDATED: Remove per-row y-axis labels and instead add one left-side row title
-    per feature (outside the axes) to avoid stacked y-label overlap.
-    """
-    nrows = len(features)
-    ncols = len(ks)
-
-    fig_w = 4.2 * ncols
-    fig_h = max(6.0, 0.75 * nrows)
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), dpi=150, squeeze=False)
-
-    for cidx, k in enumerate(ks):
-        labels = label_map[k]
-        clusts = _cluster_ids(labels)
-
-        for ridx, feat in enumerate(features):
-            ax = axes[ridx, cidx]
-            if feat not in feature_names:
-                ax.axis("off")
-                continue
-
-            j = feature_names.index(feat)
-            props = []
-            for c in clusts:
-                vals = X[labels == c, j]
-                vals = vals[np.isfinite(vals)]
-                props.append(float(np.mean(vals)) if vals.size else np.nan)
-
-            ax.bar([str(c) for c in clusts], props)
-            ax.set_ylim(0, 1)
-
-            if ridx == 0:
-                ax.set_title(f"k{k}", fontsize=10)
-
-            # UPDATED: remove per-axis y-labels (feature names) to avoid overlap
-            ax.set_ylabel("")
-
-            if ridx != nrows - 1:
-                ax.set_xticklabels([])
-                ax.set_xlabel("")
-            else:
-                ax.set_xlabel("Cluster", fontsize=8)
-
-            ax.tick_params(axis="x", labelsize=7)
-            ax.tick_params(axis="y", labelsize=7)
-
-    fig.suptitle("Cluster-wise distributions (binary): top features across k", fontsize=12)
-
-    # UPDATED: create room for left-side row titles, then add them
-    fig.subplots_adjust(left=0.14)
-    _add_left_row_titles(fig, axes, features, fontsize=8)
-
-    plt.tight_layout(rect=[0.14, 0, 1, 0.98])
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close(fig)
-
-
-def load_labels(k: int) -> np.ndarray:
-    path = PAM_DIR / f"pam_labels_k{k}.npy"
-    labels = np.load(path)
-    return labels.astype(int)
-
-
-def contingency_matrix(labels_from: np.ndarray, labels_to: np.ndarray) -> pd.DataFrame:
-    """
-    Counts: rows=clusters at k_from, cols=clusters at k_to.
+    Counts = clusters at k_from, cols=clusters at k_to.
     """
     return pd.crosstab(
         pd.Series(labels_from, name="from"),
@@ -2431,41 +1985,23 @@ def contingency_matrix(labels_from: np.ndarray, labels_to: np.ndarray) -> pd.Dat
     )
 
 
-def row_normalized_percentages(ct: pd.DataFrame) -> pd.DataFrame:
-    """
-    Row-normalized percentages (0..1). Handles zero rows safely.
-    """
+def stability_metrics_for_transition(k_from, k_to, labels_from, labels_to, split_threshold=0.80, weighted=True):
+    ct = contingency_matrix(labels_from, labels_to)
     row_sums = ct.sum(axis=1).replace(0, np.nan)
     row_pct = ct.div(row_sums, axis=0).astype(float).fillna(0.0)
-    return row_pct
-
-
-def row_entropy(row_probs: np.ndarray) -> float:
-    """
-    Entropy (natural log) for a single probability vector.
-    Zeros ignored. If all zeros -> entropy=0.
-    """
-    p = row_probs[row_probs > 0]
-    if p.size == 0:
-        return 0.0
-    return float(-(p * np.log(p)).sum())
-
-
-def stability_metrics_for_transition(
-    k_from: int,
-    k_to: int,
-    labels_from: np.ndarray,
-    labels_to: np.ndarray,
-    split_threshold: float = 0.80,
-    weighted: bool = True,
-) -> dict:
-    ct = contingency_matrix(labels_from, labels_to)
-    row_pct = row_normalized_percentages(ct)
 
     # per-row: max overlap, entropy, effective #targets (perplexity)
     max_row = row_pct.max(axis=1).to_numpy(dtype=float)
 
-    ent = np.array([row_entropy(row_pct.loc[i].to_numpy(dtype=float)) for i in row_pct.index], dtype=float)
+    ent_values = []
+    for i in row_pct.index:
+        probs = row_pct.loc[i].to_numpy(dtype=float)
+        probs = probs[probs > 0]
+        if probs.size == 0:
+            ent_values.append(0.0)
+        else:
+            ent_values.append(float(-(probs * np.log(probs)).sum()))
+    ent = np.array(ent_values, dtype=float)
     eff_targets = np.exp(ent)
 
     # weights are cluster sizes (row totals)
@@ -2491,63 +2027,16 @@ def stability_metrics_for_transition(
         "pct_clusters_split": pct_split,                # 0..100
         "effective_num_targets_median": med_eff_targets # >=1
     }
-
-
-def make_sankey_adjacent(
-    k_from: int,
-    k_to: int,
-    labels_from: np.ndarray,
-    labels_to: np.ndarray,
-    out_html: Path,
-) -> None:
-    ct = contingency_matrix(labels_from, labels_to)
-
-    left_nodes = [f"k{k_from}_c{int(i)}" for i in ct.index.tolist()]
-    right_nodes = [f"k{k_to}_c{int(j)}" for j in ct.columns.tolist()]
-    labels = left_nodes + right_nodes
-
-    idx_left = {name: i for i, name in enumerate(left_nodes)}
-    idx_right = {name: i + len(left_nodes) for i, name in enumerate(right_nodes)}
-
-    sources = []
-    targets = []
-    values = []
-
-    for i in ct.index:
-        for j in ct.columns:
-            v = int(ct.loc[i, j])
-            if v <= 0:
-                continue
-            sources.append(idx_left[f"k{k_from}_c{int(i)}"])
-            targets.append(idx_right[f"k{k_to}_c{int(j)}"])
-            values.append(v)
-
-    fig = go.Figure(
-        data=[
-            go.Sankey(
-                node=dict(label=labels, pad=15, thickness=15),
-                link=dict(source=sources, target=targets, value=values),
-            )
-        ]
-    )
-    fig.update_layout(title_text=f"Sankey: k{k_from} → k{k_to} (cluster transitions)", font_size=12)
-    fig.write_html(str(out_html))
-
-
-def make_sankey_global(
-    ks: list[int],
-    label_map: dict[int, np.ndarray],
-    out_html: Path,
-) -> None:
+def make_sankey_global(ks, label_map, out_html):
     """
     Global Sankey with layers: k4 -> k5 -> k6 -> k7 (adjacent links only).
     Nodes labeled "k4_c0", etc.
     """
     # Build node labels in layer order
-    node_labels: list[str] = []
-    node_index: dict[str, int] = {}
+    node_labels = []
+    node_index = {}
 
-    def add_node(name: str) -> int:
+    def add_node(name):
         if name in node_index:
             return node_index[name]
         node_index[name] = len(node_labels)
@@ -2589,13 +2078,12 @@ def make_sankey_global(
     display(HTML(fig.to_html(include_plotlyjs='cdn')))
 
 
-# NEW: silence the Matplotlib “labels -> tick_labels” deprecation spam
 warnings.filterwarnings("ignore", category=MatplotlibDeprecationWarning)
 
 # -------------------------
 # Load labels
 # -------------------------
-label_map = {k: load_labels(k) for k in KS}
+label_map = {k: np.load(PAM_DIR / f"pam_labels_k{k}.npy").astype(int) for k in KS}
 n = len(next(iter(label_map.values())))
 
 # -------------------------
@@ -2609,7 +2097,7 @@ for i in range(len(KS)):
         ari_rows.append({"k1": k1, "k2": k2, "ARI": ari})
 
 ari_df = pd.DataFrame(ari_rows).sort_values(["k1", "k2"]).reset_index(drop=True)
-#%% 08A ARI Table
+#%% 09A ARI Table
 display(HTML(ari_df.to_html(index=False)))
 
 # Optional: keep a single CSV artifact (not many files)
@@ -2633,55 +2121,23 @@ show = stability_df.copy()
 for c in ["avg_max_row_overlap", "median_max_row_overlap", "median_row_entropy", "effective_num_targets_median"]:
     show[c] = show[c].round(3)
 show["pct_clusters_split"] = show["pct_clusters_split"].round(1)
-#%% 08B Stability Table
+#%% 09B Stability Table
 display(HTML(show.to_html(index=False)))
 
-# stability_summary_adjacent.csv output removed by request
-# Note: robustness_ari.csv output removed by request
 
 # -------------------------
 # Global Sankey only
 # -------------------------
 global_html = OUT_DIR / "sankey_global_k4_k5_k6_k7.html"
-#%% 08C Sankey
+#%% 09C Sankey
 make_sankey_global(KS, label_map, global_html)
 
-# Feature-importance outputs and distribution panels removed as requested.
 
-#% 09 K6 Inspect
-"""
-cluster5_friend_family_mhd_comfort_percentages.py
+#%% [markdown]
+# ### 10. Cluster Profiles
+# Cluster-level patterns and pairwise separations are examined for the selected k=6 solution.
 
-Prints (within cluster 5) the % who answered:
-  - "Somewhat open"
-  - "Very open"
-to friend_family_mhd_comfort (or friends_family_mhd_comfort), using FULL cluster size
-(including NaNs) as the denominator.
-
-ALSO prints (within cluster 2) the % who answered:
-  - prev_benefits: "Yes, they all did"
-  - prev_mh_options_known: "I was aware of some"
-  - prev_mh_options_known: "Yes, I was aware of all of them"
-  - prev_resources: "Yes, they all did"
-  - prev_resources: "Some did"
-  - bad_conseq_mh_prev_boss: "Yes, all of them"
-using FULL cluster size (including NaNs) as the denominator.
-
-ALSO prints (within cluster 4) the % who answered:
-  - prev_resources: "None did"
-using FULL cluster size (including NaNs) as the denominator.
-
-ALSO creates cluster-vs-cluster medoid-difference heatmaps for k=6.
-
-Expected inputs:
-  - data/out/drivers_encoded.csv
-  - data/out/pam/pam_labels_k6.npy
-"""
-
-
-
-
-
+#%% 10A Cluster Profiles - K6 Inspect
 ENCODED_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
 LABELS_PATH = PROJECT_ROOT / "data" / "out" / "pam" / "pam_labels_k6.npy"
 
@@ -2699,36 +2155,16 @@ FEATURE_CANDIDATES = [
 ]
 
 
-def load_encoded_df() -> pd.DataFrame:
-    return pd.read_csv(ENCODED_PATH)
+FWD_MAP = {}
+for feat, mapping in ORDINAL_MAPS.items():
+    FWD_MAP[f"{feat}_ord"] = {str(k): float(v) for k, v in mapping.items()}
+for feat, spec in MIXED_SPECS.items():
+    FWD_MAP[f"{feat}_ord"] = {str(k): float(v) for k, v in spec["ord_mapping"].items()}
+for feat, spec in MIXED_SPECS_V2.items():
+    FWD_MAP[f"{feat}_ord"] = {str(k): float(v) for k, v in spec["ord_mapping"].items()}
 
 
-def load_labels() -> np.ndarray:
-    return np.load(LABELS_PATH).astype(int)
-
-
-def _find_feature_column(df: pd.DataFrame) -> str:
-    for c in FEATURE_CANDIDATES:
-        if c in df.columns:
-            return c
-    return FEATURE_CANDIDATES[0]
-
-
-def _build_forward_map() -> dict[str, dict[str, float]]:
-    fwd = {}
-    for feat, mapping in ORDINAL_MAPS.items():
-        fwd[f"{feat}_ord"] = {str(k): float(v) for k, v in mapping.items()}
-    for feat, spec in MIXED_SPECS.items():
-        fwd[f"{feat}_ord"] = {str(k): float(v) for k, v in spec["ord_mapping"].items()}
-    for feat, spec in MIXED_SPECS_V2.items():
-        fwd[f"{feat}_ord"] = {str(k): float(v) for k, v in spec["ord_mapping"].items()}
-    return fwd
-
-
-FWD_MAP = _build_forward_map()
-
-
-def _get_code_for_label(feature_col: str, label: str) -> float | None:
+def _get_code_for_label(feature_col, label):
     mapping = FWD_MAP.get(feature_col)
     if mapping is None:
         return None
@@ -2745,34 +2181,10 @@ def _pct_and_count_over_full(values, value):
     return count / total, count, total
 
 
-def fmt_pct(x):
-    return f"{x*100:.1f}%"
-
-
-def _find_any_column(df, candidates):
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return candidates[0]
-
-
-def _print_cluster_label_pct(df, labels, cluster_id, feature_candidates, label_text):
-    feature = _find_any_column(df, feature_candidates)
-    values = df[feature].values[labels == cluster_id]
-    lookup = feature if feature.endswith("_ord") else f"{feature}_ord"
-    code = _get_code_for_label(lookup, label_text)
-    if code is None:
-        print("NA")
-        return
-    pct, cnt, total = _pct_and_count_over_full(values, code)
-    print(f'{feature}: "{label_text}" -> {fmt_pct(pct)} ({cnt}/{total})')
-
-
 # ============================================================
-# NEW SECTION: PAIRWISE MEDOID DIFFERENCE HEATMAPS
 # ============================================================
 
-def plot_heatmap(data, title, path, vmax=None, max_rows: Optional[int] = 30):
+def plot_heatmap(data, title, path, vmax=None, max_rows=30):
 
     if max_rows is not None and data.shape[0] > max_rows:
         data = data.loc[data.max(axis=1).sort_values(ascending=False).head(max_rows).index]
@@ -2785,14 +2197,10 @@ def plot_heatmap(data, title, path, vmax=None, max_rows: Optional[int] = 30):
     plt.close()
 
 
-def _build_raw_pairwise_diff_matrix(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    drop_missing: bool = False,
-) -> pd.DataFrame:
+def _build_raw_pairwise_diff_matrix(df_raw, labels_aligned, drop_missing=False):
     """
     Build pairwise absolute differences of answer proportions for raw features.
-    Rows: feature=answer, Columns: C{i}-C{j} for all cluster pairs.
+    Rows = answer, Columns: C{i}-C{j} for all cluster pairs.
     """
     features = [c for c in df_raw.columns if c != "respondent_id"]
     clusters = sorted(np.unique(labels_aligned).tolist())
@@ -2836,10 +2244,10 @@ def _build_raw_pairwise_diff_matrix(
 
 
 
-df = load_encoded_df()
-labels = load_labels()
+df = pd.read_csv(ENCODED_PATH)
+labels = np.load(LABELS_PATH).astype(int)
 
-feature = _find_feature_column(df)
+feature = next((c for c in FEATURE_CANDIDATES if c in df.columns), FEATURE_CANDIDATES[0])
 
 values = df[feature].values[labels == CLUSTER_ID]
 
@@ -2849,15 +2257,10 @@ code_very = _get_code_for_label(feature, "Very open") or 5
 pct_some, cnt_some, total = _pct_and_count_over_full(values, code_some)
 pct_very, cnt_very, _ = _pct_and_count_over_full(values, code_very)
 
-    # prints removed
-    # Pairwise medoid-diff heatmaps removed; keep only raw top-30 heatmap.
-    # done message removed
 
 
 
-
-#% 10 PAM Cluster Profiles K6
-# pam_cluster_profiles_k6_console.py
+#%% 10B Cluster Profiles - Detailed
 
 
 # Import ordinal maps directly from encoding.py
@@ -2869,40 +2272,11 @@ DRIVERS_RAW_PATH = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"  # befor
 K = 6
 LABELS_PATH = PAM_DIR / f"pam_labels_k{K}.npy"
 
-TOP_N = 10
-THRESHOLD = 0.45  # requested cutoff
-
-# NEW: output folder for raw (pre-encoding) driver plots
 RAW_PLOTS_DIR = PROJECT_ROOT / "data" / "out" / "pam_post" / "raw_driver_distributions_k6"
 RAW_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ------------------------------------------------------------
-# Load data
-# ------------------------------------------------------------
-
-def load_encoded_drivers() -> tuple[np.ndarray, list[str]]:
-    df = pd.read_csv(ENCODED_PATH)
-    if "respondent_id" in df.columns:
-        df = df.drop(columns=["respondent_id"])
-    X = df.to_numpy(dtype=float)
-    return X, df.columns.tolist()
-
-
-def load_labels() -> np.ndarray:
-    lab = np.load(LABELS_PATH)
-    return lab.astype(int)
-
-
-def load_preprocessed_drivers_raw() -> pd.DataFrame:
-    """
-    Loads drivers BEFORE encoding but AFTER preprocessing (skip-logic / cleaning).
-    Expected file: data/out/survey_drivers.csv
-    """
-    return pd.read_csv(DRIVERS_RAW_PATH)
-
-
-def align_labels_to_raw(df_raw: pd.DataFrame, labels: np.ndarray) -> np.ndarray:
+def align_labels_to_raw(df_raw, labels):
     """
     Ensures labels align with df_raw row order.
 
@@ -2928,7 +2302,7 @@ def align_labels_to_raw(df_raw: pd.DataFrame, labels: np.ndarray) -> np.ndarray:
 # Build reverse ordinal mapping
 # ------------------------------------------------------------
 
-def build_reverse_ordinal_map() -> dict[str, dict[float, str]]:
+def build_reverse_ordinal_map():
     reverse_map = {}
 
     for feat, mapping in ORDINAL_MAPS.items():
@@ -2948,7 +2322,7 @@ def build_reverse_ordinal_map() -> dict[str, dict[float, str]]:
 REVERSE_ORDINAL_MAP = build_reverse_ordinal_map()
 
 
-def ordinal_label(feat: str, value: float) -> str:
+def ordinal_label(feat, value):
     if not np.isfinite(value):
         return "NA"
     mapping = REVERSE_ORDINAL_MAP.get(feat, {})
@@ -2959,13 +2333,13 @@ def ordinal_label(feat: str, value: float) -> str:
 # Helpers
 # ------------------------------------------------------------
 
-def fmt_pct_or_na(x: float | None) -> str:
+def fmt_pct_or_na(x):
     if x is None or not np.isfinite(x):
         return "NA"
     return f"{x*100:.1f}%"
 
 
-def safe_median_and_pct_at_median(values: np.ndarray) -> tuple[float, float | None]:
+def safe_median_and_pct_at_median(values):
     """
     Returns:
       (median_value, pct_at_median_valid)
@@ -2983,7 +2357,7 @@ def safe_median_and_pct_at_median(values: np.ndarray) -> tuple[float, float | No
     return med, pct_valid
 
 
-def pct_at_value_over_full(values: np.ndarray, value: float) -> float | None:
+def pct_at_value_over_full(values, value):
     """
     Fraction over FULL group size (including NaNs) that equals `value`.
     If value is not finite, returns None.
@@ -2996,461 +2370,11 @@ def pct_at_value_over_full(values: np.ndarray, value: float) -> float | None:
 
 
 # ------------------------------------------------------------
-# Feature type split
 # ------------------------------------------------------------
 
-def split_feature_types(X: np.ndarray, feature_names: list[str]):
-    binary = []
-    ordinal = []
 
-    for j, feat in enumerate(feature_names):
-        col = X[:, j]
-        col = col[np.isfinite(col)]
-        if col.size == 0:
-            ordinal.append(feat)
-            continue
-        uniq = np.unique(col)
-        if np.all(np.isin(uniq, [0.0, 1.0])):
-            binary.append(feat)
-        else:
-            ordinal.append(feat)
 
-    return binary, ordinal
-
-
-# ------------------------------------------------------------
-# Cluster vs Rest Tables (UNCHANGED for binary; ordinal % now over FULL group size)
-# ------------------------------------------------------------
-
-def build_binary_table(X, features, labels, cluster_id):
-    rows = []
-    mask_c = labels == cluster_id
-    mask_r = ~mask_c
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-
-        c_vals = col[mask_c]
-        r_vals = col[mask_r]
-
-        c_vals = c_vals[np.isfinite(c_vals)]
-        r_vals = r_vals[np.isfinite(r_vals)]
-
-        if c_vals.size == 0 or r_vals.size == 0:
-            continue
-
-        p_c = float(np.mean(c_vals))
-        p_r = float(np.mean(r_vals))
-
-        rows.append({
-            "feature": feat,
-            "cluster_%": f"{p_c*100:.1f}%",
-            "rest_%": f"{p_r*100:.1f}%",
-            "_rank": abs(p_c - p_r)
-        })
-
-    df = pd.DataFrame(rows)
-    return df.sort_values("_rank", ascending=False).head(TOP_N).drop(columns="_rank")
-
-
-def build_ordinal_table(X, features, labels, cluster_id):
-    rows = []
-    mask_c = labels == cluster_id
-    mask_r = ~mask_c
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-
-        c_raw = col[mask_c]  # includes NaNs
-        r_raw = col[mask_r]  # includes NaNs
-
-        med_c, _pct_c_valid = safe_median_and_pct_at_median(c_raw)
-        med_r, _pct_r_valid = safe_median_and_pct_at_median(r_raw)
-
-        # % at CLUSTER median, over FULL group size (includes NaNs)
-        pct_c_full = pct_at_value_over_full(c_raw, med_c)
-
-        # % in REST at CLUSTER median, over FULL rest size
-        pct_r_full_at_cluster_med = pct_at_value_over_full(r_raw, med_c)
-
-        rows.append({
-            "feature": feat,
-            "cluster_median": ordinal_label(feat, med_c),
-            "rest_median": ordinal_label(feat, med_r),
-            "cluster_%_at_cluster_median": fmt_pct_or_na(pct_c_full),
-            "rest_%_at_cluster_median": fmt_pct_or_na(pct_r_full_at_cluster_med),
-            "_rank": abs(med_c - med_r) if (np.isfinite(med_c) and np.isfinite(med_r)) else -1.0
-        })
-
-    df = pd.DataFrame(rows)
-    df = df.sort_values("_rank", ascending=False)
-    df = df[df["_rank"] >= 0] if (df["_rank"] >= 0).any() else df
-    return df.head(TOP_N).drop(columns="_rank")
-
-
-# ------------------------------------------------------------
-# Pairwise Cluster Comparison Tables (ordinal % now over FULL group size)
-# ------------------------------------------------------------
-
-def build_binary_pairwise(X, features, labels, c1, c2):
-    rows = []
-    mask1 = labels == c1
-    mask2 = labels == c2
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-
-        v1 = col[mask1]
-        v2 = col[mask2]
-
-        v1 = v1[np.isfinite(v1)]
-        v2 = v2[np.isfinite(v2)]
-
-        if v1.size == 0 or v2.size == 0:
-            continue
-
-        p1 = float(np.mean(v1))
-        p2 = float(np.mean(v2))
-
-        rows.append({
-            "feature": feat,
-            f"cluster_{c1}": f"{p1*100:.1f}%",
-            f"cluster_{c2}": f"{p2*100:.1f}%",
-            "_rank": abs(p1 - p2)
-        })
-
-    df = pd.DataFrame(rows)
-    return df.sort_values("_rank", ascending=False).head(TOP_N).drop(columns="_rank")
-
-
-def build_ordinal_pairwise(X, features, labels, c1, c2):
-    rows = []
-    mask1 = labels == c1
-    mask2 = labels == c2
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-
-        v1_raw = col[mask1]  # includes NaNs
-        v2_raw = col[mask2]  # includes NaNs
-
-        med1, _pct1_valid = safe_median_and_pct_at_median(v1_raw)
-        med2, _pct2_valid = safe_median_and_pct_at_median(v2_raw)
-
-        # % at each cluster's OWN median, over FULL cluster size
-        pct1_full = pct_at_value_over_full(v1_raw, med1)
-        pct2_full = pct_at_value_over_full(v2_raw, med2)
-
-        rows.append({
-            "feature": feat,
-            f"cluster_{c1}_median": ordinal_label(feat, med1),
-            f"cluster_{c2}_median": ordinal_label(feat, med2),
-            f"cluster_{c1}_%_at_own_median": fmt_pct_or_na(pct1_full),
-            f"cluster_{c2}_%_at_own_median": fmt_pct_or_na(pct2_full),
-            "_rank": abs(med1 - med2) if (np.isfinite(med1) and np.isfinite(med2)) else -1.0
-        })
-
-    df = pd.DataFrame(rows)
-    df = df.sort_values("_rank", ascending=False)
-    df = df[df["_rank"] >= 0] if (df["_rank"] >= 0).any() else df
-    return df.head(TOP_N).drop(columns="_rank")
-
-
-# ------------------------------------------------------------
-# NEW: High-prevalence feature lists (>= THRESHOLD)
-# ------------------------------------------------------------
-
-def list_binary_features_ge_threshold(X, features, labels, cluster_id, threshold: float):
-    """
-    Lists binary features with proportion(==1) >= threshold within the cluster.
-    Returns a DataFrame: feature, value (always "1"), cluster_%.
-    """
-    rows = []
-    mask_c = labels == cluster_id
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-        c_vals = col[mask_c]
-        c_vals = c_vals[np.isfinite(c_vals)]
-        if c_vals.size == 0:
-            continue
-        p = float(np.mean(c_vals))
-        if p >= threshold:
-            rows.append({
-                "feature": feat,
-                "value": "1",
-                "cluster_%": f"{p*100:.1f}%"
-            })
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    df["_share"] = df["cluster_%"].str.replace("%", "", regex=False).astype(float)
-    df = df.sort_values("_share", ascending=False).drop(columns="_share")
-    return df
-
-
-def list_ordinal_values_ge_threshold(X, features, labels, cluster_id, threshold: float):
-    """
-    For each ordinal feature, finds any single value whose share (over FULL cluster size)
-    is >= threshold. If multiple values qualify, keeps the highest-share value.
-    Returns DataFrame: feature, value_label, cluster_%.
-    """
-    rows = []
-    mask_c = labels == cluster_id
-
-    for feat in features:
-        j = feature_names.index(feat)
-        col = X[:, j]
-        c_raw = col[mask_c]  # includes NaNs
-
-        if c_raw.size == 0:
-            continue
-
-        finite = c_raw[np.isfinite(c_raw)]
-        if finite.size == 0:
-            continue
-
-        uniq = np.unique(finite)
-        best_val = None
-        best_share = -1.0
-
-        for v in uniq:
-            share = float(np.mean(c_raw == v))  # denominator includes NaNs
-            if share > best_share:
-                best_share = share
-                best_val = float(v)
-
-        if best_val is None:
-            continue
-
-        if best_share >= threshold:
-            rows.append({
-                "feature": feat,
-                "value": ordinal_label(feat, best_val),
-                "cluster_%": f"{best_share*100:.1f}%"
-            })
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    df["_share"] = df["cluster_%"].str.replace("%", "", regex=False).astype(float)
-    df = df.sort_values("_share", ascending=False).drop(columns="_share")
-    return df
-
-
-# ------------------------------------------------------------
-# NEW: Raw (pre-encoding) stacked bar plots by cluster
-# ------------------------------------------------------------
-
-def plot_raw_feature_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    feature: str,
-    out_path: Path,
-) -> None:
-    """
-    For ONE raw driver feature:
-      - x axis: clusters 0..5
-      - stacked segments: answer categories (including NA for missing)
-      - each bar sums to 1.0 (proportions within cluster)
-    """
-    series = df_raw[feature].copy()
-
-    # normalize missing display
-    series = series.astype(object)
-    series[pd.isna(series)] = "NA"
-    series = series.astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    # union of categories across all data (stable order by overall frequency)
-    overall_counts = series.value_counts(dropna=False)
-    categories = overall_counts.index.tolist()
-
-    # build proportion table: rows=clusters, cols=categories
-    mat = []
-    for c in clusters:
-        s_c = series[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)  # shape (n_clusters, n_categories)
-
-    # plot
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    # NOTE: we do not hardcode specific colors; matplotlib will cycle colors by category.
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title(f"Raw feature distribution by cluster (k=6): {feature}")
-
-    # keep legend readable (can get long)
-    plt.legend(
-        title="Answer",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def _normalize_benefits_value(x: object) -> str:
-    """
-    Normalizes raw 'benefits' answers into 4 buckets:
-      Y  = Yes
-      N  = No
-      DK = I don't know
-      NE = Not eligible for coverage / N/A (and missing)
-    """
-    if pd.isna(x):
-        return "NE"
-    s = str(x).strip()
-
-    s_low = s.lower()
-    if s_low in {"yes", "y"}:
-        return "Y"
-    if s_low in {"no", "n"}:
-        return "N"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "DK"
-    if "not eligible" in s_low or "n/a" in s_low or s_low in {"na", "n.a.", "n\\a"}:
-        return "NE"
-
-    # fall back to a compact, but explicit, bucket to avoid exploding categories
-    return "NE"
-
-
-def _normalize_resources_value(x: object) -> str:
-    """
-    Normalizes raw 'resources' answers into 3 buckets:
-      Y  = Yes
-      N  = No
-      DK = I don't know (and missing)
-    """
-    if pd.isna(x):
-        return "DK"
-    s = str(x).strip()
-
-    s_low = s.lower()
-    if s_low in {"yes", "y"}:
-        return "Y"
-    if s_low in {"no", "n"}:
-        return "N"
-    if "don't know" in s_low or "dont know" in s_low or s_low in {"dk", "idk"}:
-        return "DK"
-
-    # fall back to DK to keep the combined legend limited to 12 combinations
-    return "DK"
-
-
-def plot_raw_benefits_and_resources_stacked_by_cluster(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    benefits_feature: str,
-    resources_feature: str,
-    out_path: Path,
-) -> None:
-    """
-    Combined raw feature plot: 'benefits and resources'
-
-    - combines two raw driver features into 12 joint answer categories:
-        Benefits:  Y / N / DK / NE
-        Resources: Y / N / DK
-      -> 4 * 3 = 12 combinations
-
-    - x axis: clusters 0..5
-    - stacked segments: joint answer categories
-    - each bar sums to 1.0 (proportions within cluster)
-
-    Legend uses compact labels of the form:
-      B:Y R:N   (B=benefits, R=resources)
-    """
-    b = df_raw[benefits_feature].map(_normalize_benefits_value)
-    r = df_raw[resources_feature].map(_normalize_resources_value)
-
-    joint = ("B:" + b + " R:" + r).astype(str)
-
-    clusters = sorted(np.unique(labels_aligned).tolist())
-
-    # stable category order: by overall frequency, then lexicographic to keep ties deterministic
-    overall_counts = joint.value_counts(dropna=False)
-    categories = overall_counts.sort_values(ascending=False).index.tolist()
-
-    mat = []
-    for c in clusters:
-        s_c = joint[labels_aligned == c]
-        vc = s_c.value_counts(dropna=False)
-        total = len(s_c)
-        props = [(float(vc.get(cat, 0)) / total) if total > 0 else 0.0 for cat in categories]
-        mat.append(props)
-
-    mat = np.array(mat, dtype=float)
-
-    fig_w = 10
-    fig_h = 4.5
-    plt.figure(figsize=(fig_w, fig_h), dpi=150)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(categories):
-        plt.bar(x, mat[:, j], bottom=bottom, label=str(cat))
-        bottom += mat[:, j]
-
-    plt.xticks(x, [str(c) for c in clusters])
-    plt.ylim(0, 1.0)
-    plt.xlabel("Cluster")
-    plt.ylabel("Proportion within cluster")
-    plt.title("Raw feature distribution by cluster (k=6): benefits and resources")
-
-    plt.legend(
-        title="Answer (B=benefits, R=resources)",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-    )
-
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-def plot_raw_feature_panel(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    features: list[str],
-    out_path: Path,
-    suptitle: str,
-    ncols: int = 3,
-    color_map: Optional[dict[str, str]] = None,
-    recode_map: Optional[dict[str, "Callable[[pd.Series], pd.Series]"]] = None,
-    legend_mode: str = "shared",
-    legend_order: Optional[list[str]] = None,
-) -> None:
+def plot_raw_feature_panel(df_raw, labels_aligned, features, out_path, suptitle, ncols=3, color_map=None, recode_map=None, legend_mode="shared", legend_order=None):
     n = len(features)
     ncols = max(1, ncols)
     nrows = (n + ncols - 1) // ncols
@@ -3462,7 +2386,7 @@ def plot_raw_feature_panel(
     x = np.arange(len(clusters))
 
     # Build a global category list across all features to ensure legend completeness (shared legend mode).
-    all_categories: list[str] = []
+    all_categories = []
     if legend_mode == "shared":
         for feat in features:
             series = df_raw[feat].copy()
@@ -3477,7 +2401,7 @@ def plot_raw_feature_panel(
                     all_categories.append(c)
 
     # Assign colors deterministically for any categories not explicitly mapped.
-    color_for_cat: dict[str, str] = {}
+    color_for_cat = {}
     if color_map:
         color_for_cat.update(color_map)
     palette = plt.get_cmap("tab20").colors
@@ -3513,7 +2437,16 @@ def plot_raw_feature_panel(
         bottom = np.zeros(len(clusters), dtype=float)
         for j, cat in enumerate(categories):
             color = color_for_cat.get(cat) if color_for_cat else None
-            ax.bar(x, mat[:, j], bottom=bottom, label=str(cat), color=color)
+            ax.bar(
+                x,
+                mat[:, j],
+                bottom=bottom,
+                label=str(cat),
+                color=color,
+                edgecolor="none",
+                linewidth=0.0,
+                antialiased=False,
+            )
             bottom += mat[:, j]
 
         ax.set_xticks(x, [str(c) for c in clusters])
@@ -3550,19 +2483,17 @@ def plot_raw_feature_panel(
         plt.tight_layout(rect=[0.04, 0.03, 0.86, 0.96])
     else:
         plt.tight_layout(rect=[0.04, 0.03, 1, 0.96])
-    plt.savefig(out_path, bbox_inches="tight")
-    # panel display message removed
-    display(Image(filename=str(out_path)))
-    plt.close()
+    fig.savefig(out_path, bbox_inches="tight", dpi=300)
+    plt.show()
+    plt.close(fig)
 
 
 
 
-def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray) -> None:
+def make_all_raw_feature_plots(df_raw, labels_aligned):
     """
     Creates one PNG per raw feature in df_raw (excluding respondent_id).
     """
-    # raw plot header messages removed
 
     # Weak separators panel (restore)
     panel_features = [
@@ -3628,7 +2559,7 @@ def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray)
             "Not applicable": "#c7c7c7",
         }
 
-        def recode_benefits(s: pd.Series) -> pd.Series:
+        def recode_benefits(s):
             s = s.astype(object)
             s = s.where(~pd.isna(s), other="NA")
             s = s.astype(str).str.strip()
@@ -3637,7 +2568,7 @@ def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray)
                 {"Not eligible for coverage / N/A": "No or not eligible for coverage", "No": "No or not eligible for coverage"}
             )
 
-        def recode_leave_easy(s: pd.Series) -> pd.Series:
+        def recode_leave_easy(s):
             s = s.astype(object)
             s = s.where(~pd.isna(s), other="NA")
             s = s.astype(str).str.strip()
@@ -3694,7 +2625,7 @@ def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray)
             "Not applicable": "#7f7f7f",
         }
 
-        def recode_prev_answers(s: pd.Series) -> pd.Series:
+        def recode_prev_answers(s):
             s = s.astype(object)
             s = s.where(~pd.isna(s), other="Not applicable")
             s = s.astype(str).str.strip()
@@ -3772,7 +2703,7 @@ def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray)
             "Yes, all of them": "#d62728",
         }
 
-        def recode_stigma(s: pd.Series) -> pd.Series:
+        def recode_stigma(s):
             s = s.astype(object)
             s = s.where(~pd.isna(s), other="Not applicable")
             s = s.astype(str).str.strip()
@@ -3805,12 +2736,7 @@ def make_all_raw_feature_plots(df_raw: pd.DataFrame, labels_aligned: np.ndarray)
         print(f"Skipping stigma-related panel (missing columns: {missing})")
 
 
-def build_raw_cluster_vs_rest_tables(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    top_n: int = 15,
-    exclude_answer_substrings: dict[int, list[str]] | None = None,
-) -> dict[int, pd.DataFrame]:
+def build_raw_cluster_vs_rest_tables(df_raw, labels_aligned, top_n=15, exclude_answer_substrings=None):
     """
     For each cluster, compute top-N raw feature-answer categories by absolute
     deviation in proportion vs the rest of the sample.
@@ -3818,7 +2744,7 @@ def build_raw_cluster_vs_rest_tables(
     """
     features = [c for c in df_raw.columns if c != "respondent_id"]
     clusters = sorted(np.unique(labels_aligned).tolist())
-    results: dict[int, pd.DataFrame] = {}
+    results = {}
 
     # Pre-normalize to strings and handle missing
     df_norm = df_raw[features].copy()
@@ -3856,7 +2782,7 @@ def build_raw_cluster_vs_rest_tables(
         df_all = pd.DataFrame(rows).sort_values("_diff", ascending=False)
         if exclude_answer_substrings and int(c) in exclude_answer_substrings:
             subs = [s.strip().lower() for s in exclude_answer_substrings[int(c)]]
-            def _keep_feature(x: str) -> bool:
+            def _keep_feature(x):
                 lx = x.lower()
                 return not any(sub in lx for sub in subs)
             df_all = df_all[df_all["feature"].map(_keep_feature)]
@@ -3866,12 +2792,7 @@ def build_raw_cluster_vs_rest_tables(
     return results
 
 
-def build_raw_cluster_vs_rest_selected(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    cluster_id: int,
-    selected_features: list[str],
-) -> pd.DataFrame:
+def build_raw_cluster_vs_rest_selected(df_raw, labels_aligned, cluster_id, selected_features):
     features = [f for f in df_raw.columns if f != "respondent_id"]
     selected_lc = {x.strip().lower() for x in selected_features}
 
@@ -3911,19 +2832,14 @@ def build_raw_cluster_vs_rest_selected(
     return pd.DataFrame(rows)
 
 
-def build_raw_pairwise_tables(
-    df_raw: pd.DataFrame,
-    labels_aligned: np.ndarray,
-    pairs: list[tuple[int, int]],
-    top_n: int = 15,
-) -> dict[tuple[int, int], pd.DataFrame]:
+def build_raw_pairwise_tables(df_raw, labels_aligned, pairs, top_n=15):
     """
     For each cluster pair, compute top-N raw feature-answer categories by absolute
     deviation in proportion between the two clusters.
     Returns: {(c1, c2): DataFrame}
     """
     features = [c for c in df_raw.columns if c != "respondent_id"]
-    results: dict[tuple[int, int], pd.DataFrame] = {}
+    results = {}
 
     df_norm = df_raw[features].copy()
     for col in features:
@@ -3969,12 +2885,14 @@ def build_raw_pairwise_tables(
 # ------------------------------------------------------------
 
 
-def pam_cluster_profiles_main() -> None:
+def pam_cluster_profiles_main():
     global feature_names
-    X, feature_names = load_encoded_drivers()
-    labels = load_labels()
-
-    binary_feats, ordinal_feats = split_feature_types(X, feature_names)
+    encoded_df = pd.read_csv(ENCODED_PATH)
+    if "respondent_id" in encoded_df.columns:
+        encoded_df = encoded_df.drop(columns=["respondent_id"])
+    X = encoded_df.to_numpy(dtype=float)
+    feature_names = encoded_df.columns.tolist()
+    labels = np.load(LABELS_PATH).astype(int)
 
     clusters = sorted(np.unique(labels))
 
@@ -3990,9 +2908,8 @@ def pam_cluster_profiles_main() -> None:
     display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
 
     # ------------------------
-    # NEW: Raw (pre-encoding) plots by cluster
     # ------------------------
-    df_raw = load_preprocessed_drivers_raw()
+    df_raw = pd.read_csv(DRIVERS_RAW_PATH)
     labels_raw = align_labels_to_raw(df_raw, labels)
     make_all_raw_feature_plots(df_raw, labels_raw)
 
@@ -4007,7 +2924,6 @@ def pam_cluster_profiles_main() -> None:
         max_rows=30,
     )
 
-    # heatmap display message removed
     display(Image(filename=str(out_top30)))
 
     # Raw feature answers: cluster vs rest (Top 15)
@@ -4178,36 +3094,11 @@ def pam_cluster_profiles_main() -> None:
 
 pam_cluster_profiles_main()
 
-#%% 11 K6 Cluster Overlays
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""pam_overlay_profiles_k6_plots_cleaned.py
+#%% [markdown]
+# ### 11. Overlay Profiles
+# Clusters are characterized using overlay variables that were excluded from the clustering drivers.
 
-PAM overlay cluster-profile plots (k=6), with cleanup / recoding for:
-- gender -> {Male, Female, Transgender Male, Transgender Female, Nonbinary / Gender Diverse, Other, Prefer Not to Say / Invalid Response}
-- age -> custom bins:
-    "<20", "20-25", "26-30", "31-35", "36-40", "41-50", "51+"
-  (outliers clipped to nearest bin edge)
-- country_live -> coarse regions (US, UK, Canada, European Union, Other Europe, Asia, Oceania, Latin America & Caribbean, Africa, Middle East, Other/NA)
-- med_pro_condition -> {No diagnosis/NA, Mood disorder, anxiety disorder, other}
-  (Mood disorder if both words "mood" and "disorder" appear; anxiety disorder if both "anxiety" and "disorder" appear)
-- work_position -> keyword + hierarchy based recode into:
-    "Sales", "Dev Evangelist/Advocate", "Leadership (Supervisor/Exec)",
-    "DevOps/SysAdmin", "Support", "Full-stack (FE+BE)",
-    "Front-end Developer", "Back-end Developer", "Designer", "other", "NA"
-  with hierarchy:
-    Sales > Dev Evangelist/Advocate > Leadership > DevOps/SysAdmin > Support >
-    (FE+BE) > FE-only/BE-only/Designer-only > other
-
-Outputs ONLY plots (stacked proportions by cluster).
-No extra CSVs are produced.
-
-Usage:
-  python pam_overlay_profiles_k6_plots_cleaned.py
-
-Override paths if needed:
-  python pam_overlay_profiles_k6_plots_cleaned.py --overlays ... --labels ... --encoded-drivers ... --outdir ...
-"""
+#%% 11 Overlay Profiles
 
 
 
@@ -4217,7 +3108,7 @@ Override paths if needed:
 # Helpers: string normalization
 # -----------------------------
 
-def norm_text(x) -> str:
+def norm_text(x):
     if pd.isna(x):
         return ""
     s = str(x).strip()
@@ -4228,7 +3119,7 @@ def norm_text(x) -> str:
     return s
 
 
-def is_missing_like(s: str) -> bool:
+def is_missing_like(s):
     s = norm_text(s)
     if s in {"", "na", "n/a", "nan", "none", "null", "no answer"}:
         return True
@@ -4251,7 +3142,7 @@ GENDER_TARGET_ORDER = [
     "Prefer Not to Say / Invalid Response",
 ]
 
-def recode_gender(val) -> str:
+def recode_gender(val):
     s = norm_text(val)
 
     if is_missing_like(s):
@@ -4310,7 +3201,7 @@ AGE_LABELS = [
     "more than 51",
 ]
 
-def recode_age(val) -> str:
+def recode_age(val):
     v = pd.to_numeric(val, errors="coerce")
     if not np.isfinite(v):
         return "NA"
@@ -4356,7 +3247,7 @@ OCEANIA = {"australia","new zealand"}
 AFRICA = {"south africa","nigeria","kenya","ghana","egypt","morocco","algeria","tunisia","ethiopia","uganda","tanzania","zambia","zimbabwe","namibia","botswana"}
 LATAM = {"mexico","brazil","argentina","colombia","chile","peru","ecuador","uruguay","paraguay","bolivia","venezuela","guatemala","costa rica","panama","honduras","el salvador","nicaragua","dominican republic","cuba","haiti","jamaica","trinidad and tobago"}
 
-def recode_country_region(val) -> str:
+def recode_country_region(val):
     s = norm_text(val)
     if is_missing_like(s):
         return "Other/NA"
@@ -4407,7 +3298,7 @@ MED_GROUPS_ORDER = [
     "other",
 ]
 
-def recode_med_condition(val) -> str:
+def recode_med_condition(val):
     s = norm_text(val)
     if is_missing_like(s):
         return "No diagnosis/NA"
@@ -4416,7 +3307,6 @@ def recode_med_condition(val) -> str:
     if any(k in s for k in ["no diagnosis", "no dx", "none", "healthy", "no condition", "no mental"]):
         return "No diagnosis/NA"
 
-    # apply only if BOTH words appear (as requested)
     if ("mood" in s) and ("disorder" in s):
         return "Mood disorder"
     if ("anxiety" in s) and ("disorder" in s):
@@ -4443,10 +3333,10 @@ WORK_ORDER = [
     "NA",
 ]
 
-def _contains_any(s: str, needles: Iterable[str]) -> bool:
+def _contains_any(s, needles):
     return any(n in s for n in needles)
 
-def recode_work_position(val) -> str:
+def recode_work_position(val):
     s = norm_text(val)
     if is_missing_like(s):
         return "NA"
@@ -4506,7 +3396,7 @@ def recode_work_position(val) -> str:
 # Alignment: labels <-> respondent_id
 # -----------------------------
 
-def align_labels_to_overlays(df_over: pd.DataFrame, labels: np.ndarray, encoded_drivers_csv: Path) -> np.ndarray:
+def align_labels_to_overlays(df_over, labels, encoded_drivers_csv):
     if "respondent_id" in df_over.columns and encoded_drivers_csv.exists():
         df_enc = pd.read_csv(encoded_drivers_csv)
         if "respondent_id" in df_enc.columns and len(df_enc) == len(labels):
@@ -4521,29 +3411,7 @@ def align_labels_to_overlays(df_over: pd.DataFrame, labels: np.ndarray, encoded_
 # Plotting: stacked proportions
 # -----------------------------
 
-def safe_name(s: str) -> str:
-    return (
-        str(s)
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(":", "_")
-        .replace("|", "_")
-        .replace("\n", "_")
-        .strip()
-    )
-
-
-def plot_categorical_stacked_by_cluster(
-    series: pd.Series,
-    labels: np.ndarray,
-    title: str,
-    out_path: Optional[Path] = None,
-    category_order: Optional[List[str]] = None,
-    legend_title: str = "Answer",
-    min_prop_to_keep: float = 0.0,
-    max_categories: Optional[int] = None,
-    ax: Optional["plt.Axes"] = None,
-) -> None:
+def plot_categorical_stacked_by_cluster(series, labels, title, out_path=None, category_order=None, legend_title="Answer", min_prop_to_keep=0.0, max_categories=None, ax=None):
     s = series.copy()
     s = s.astype(object)
     s[pd.isna(s)] = "NA"
@@ -4591,7 +3459,15 @@ def plot_categorical_stacked_by_cluster(
     bottom = np.zeros(len(clusters), dtype=float)
 
     for j, cat in enumerate(cats):
-        ax.bar(x, mat[:, j], bottom=bottom, label=str(cat))
+        ax.bar(
+            x,
+            mat[:, j],
+            bottom=bottom,
+            label=str(cat),
+            edgecolor="none",
+            linewidth=0.0,
+            antialiased=False,
+        )
         bottom += mat[:, j]
 
     ax.set_xticks(x, [str(c) for c in clusters])
@@ -4602,11 +3478,7 @@ def plot_categorical_stacked_by_cluster(
     ax.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
 
 
-def dominant_answer_table(
-    df: pd.DataFrame,
-    labels: np.ndarray,
-    features: list[str],
-) -> pd.DataFrame:
+def dominant_answer_table(df, labels, features):
     clusters = sorted(np.unique(labels).astype(int).tolist())
     rows = []
     for c in clusters:
@@ -4628,10 +3500,7 @@ def dominant_answer_table(
     return pd.DataFrame(rows)
 
 
-def cluster_answer_pct_table(
-    series: pd.Series,
-    labels: np.ndarray,
-) -> pd.DataFrame:
+def cluster_answer_pct_table(series, labels):
     s = series.astype(object)
     s[pd.isna(s)] = "NA"
     s = s.astype(str).str.strip().replace({"": "NA"})
@@ -4653,7 +3522,7 @@ def cluster_answer_pct_table(
 # Main: apply recodes + plot
 # -----------------------------
 
-def apply_recodes(df_over: pd.DataFrame) -> pd.DataFrame:
+def apply_recodes(df_over):
     df = df_over.copy()
 
     if "gender" in df.columns:
@@ -4744,9 +3613,9 @@ if all(f in df.columns for f in panel_feats):
 
     panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_age_gender_country_work_position.png"
     plt.tight_layout()
-    plt.savefig(panel_path, bbox_inches="tight")
-    display(Image(filename=str(panel_path)))
-    plt.close()
+    fig.savefig(panel_path, bbox_inches="tight", dpi=300)
+    plt.show()
+    plt.close(fig)
 else:
     missing = [f for f in panel_feats if f not in df.columns]
     print(f"Skipping overlay panel (missing columns: {missing})")
@@ -4792,9 +3661,9 @@ if all(f in df.columns for f in panel_feats):
 
     panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_mhd_past_current_mhd_pro_treatment_no_treat_mhd_bad_work.png"
     plt.tight_layout()
-    plt.savefig(panel_path, bbox_inches="tight")
-    display(Image(filename=str(panel_path)))
-    plt.close()
+    fig.savefig(panel_path, bbox_inches="tight", dpi=300)
+    plt.show()
+    plt.close(fig)
 else:
     missing = [f for f in panel_feats if f not in df.columns]
     print(f"Skipping overlay panel (missing columns: {missing})")
@@ -4841,9 +3710,9 @@ if all(f in df.columns for f in panel_feats):
 
     panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_mhd_hurt_career_coworkers_view_neg_mhd_med_pro_condition_mhd_by_med_pro.png"
     plt.tight_layout()
-    plt.savefig(panel_path, bbox_inches="tight")
-    display(Image(filename=str(panel_path)))
-    plt.close()
+    fig.savefig(panel_path, bbox_inches="tight", dpi=300)
+    plt.show()
+    plt.close(fig)
 else:
     missing = [f for f in panel_feats if f not in df.columns]
     print(f"Skipping overlay panel (missing columns: {missing})")
