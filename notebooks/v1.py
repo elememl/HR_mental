@@ -2026,7 +2026,7 @@ def plot_pcoa_3d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, 
 
     # Increase right margin and avoid tight bbox cropping
     fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
-    plt.savefig(save_path)
+    fig.savefig(save_path)
     plt.close(fig)
 
 
@@ -2066,7 +2066,7 @@ def main() -> None:
     # no extra console summary
 main()
 
-#% 07B UMAP Visual
+#%% 07B UMAP Visual
 # pam_umap_k6.py
 
 from umap import UMAP
@@ -2098,24 +2098,43 @@ def load_umap_labels_k6() -> np.ndarray:
     return labels
 
 
-def fit_umap_precomputed_gower_2d(
+def fit_umap_precomputed_gower(
     D: np.ndarray,
-    n_neighbors: int = 12,
-    min_dist: float = 0.0,
-    spread: float = 2.0,
+    n_components: int = 2,
+    n_neighbors: int = 6,
+    min_dist: float = 0.5,
     random_state: int = 42,
+    spread: float = 2,
 ) -> np.ndarray:
+    import warnings
+
     reducer = UMAP(
-        n_components=2,
+        n_components=n_components,
         metric="precomputed",
         n_neighbors=n_neighbors,
         min_dist=min_dist,
-        spread=spread,
         random_state=random_state,
+        spread=spread,
+        n_jobs=1,
     )
-    emb = reducer.fit_transform(D)
-    if emb.shape != (D.shape[0], 2):
-        raise ValueError(f"Unexpected UMAP embedding shape: {emb.shape}, expected {(D.shape[0], 2)}")
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*using precomputed metric; inverse_transform will be unavailable.*",
+            category=UserWarning,
+            module=r"umap\.umap_",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*n_jobs value 1 overridden to 1 by setting random_state.*",
+            category=UserWarning,
+            module=r"umap\.umap_",
+        )
+        emb = reducer.fit_transform(D)
+    if emb.shape != (D.shape[0], n_components):
+        raise ValueError(
+            f"Unexpected UMAP embedding shape: {emb.shape}, expected {(D.shape[0], n_components)}"
+        )
     return emb
 
 
@@ -2136,36 +2155,61 @@ def plot_umap_2d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> 
     plt.close()
 
 
-def run_umap_k6_2d() -> np.ndarray:
+def plot_umap_3d(embedding: np.ndarray, labels: np.ndarray, save_path: Path) -> None:
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    clusts = np.unique(labels)
+    fig = plt.figure(figsize=(11, 8), dpi=150)
+    ax = fig.add_subplot(111, projection="3d")
+
+    for c in clusts:
+        mask = labels == c
+        ax.scatter(embedding[mask, 0], embedding[mask, 1], embedding[mask, 2], s=10, alpha=0.8, label=f"Cluster {c}")
+
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_zlabel("UMAP3")
+    ax.set_title("UMAP (precomputed Gower) – k=6 clusters (3D)")
+    ax.legend(
+        markerscale=1.5,
+        frameon=False,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
+    fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
+    plt.savefig(save_path)
+    plt.close(fig)
+
+
+def run_umap_k6() -> tuple[np.ndarray, np.ndarray]:
     D = load_umap_gower_precomputed()
     labels = load_umap_labels_k6()
 
     if D.shape[0] != labels.shape[0]:
         raise ValueError(f"Row mismatch: D is {D.shape[0]}x{D.shape[1]} but labels has {labels.shape[0]}")
 
-    emb = fit_umap_precomputed_gower_2d(
-        D=D,
-        n_neighbors=12,
-        min_dist=0.0,
-        spread=2.0,
-        random_state=42,
-    )
+    emb2d = fit_umap_precomputed_gower(D=D, n_components=2)
+    emb3d = fit_umap_precomputed_gower(D=D, n_components=3)
 
     out2d = UMAP_OUT_DIR / "umap_gower_k6_2d.png"
-    plot_umap_2d(emb, labels, out2d)
+    out3d = UMAP_OUT_DIR / "umap_gower_k6_3d.png"
+    plot_umap_2d(emb2d, labels, out2d)
+    plot_umap_3d(emb3d, labels, out3d)
 
     try:
         from IPython.display import Image, display
         display(Image(filename=str(out2d)))
+        display(Image(filename=str(out3d)))
     except Exception:
         pass
 
-    return emb
+    return emb2d, emb3d
 
 
-UMAP_EMBEDDING_2D = run_umap_k6_2d()
+UMAP_EMBEDDING_2D, UMAP_EMBEDDING_3D = run_umap_k6()
 
-#% 08 Post-Cluster Validate
+#%% 08 Post-Cluster Validate
 # pam_post_validate.py
 
 from pathlib import Path
