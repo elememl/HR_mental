@@ -82,7 +82,7 @@ df_renamed = df.rename(columns=rename_map)
 df_renamed.to_csv(OUT_PATH, index=False)
 
 #% 02 Cleaning + Drivers + Overlays
-from typing import Tuple
+from typing import Optional, Tuple
 import pandas as pd
 import numpy as np
 
@@ -425,6 +425,8 @@ def main() -> None:
         pd.DataFrame({"missing_count": miss_count, "missing_percent": miss_pct})
         .query("missing_count > 0")
         .sort_values("missing_percent", ascending=False)
+        .rename_axis("feature")
+        .reset_index()
     )
 
     top15 = miss_table.head(15).copy()
@@ -499,9 +501,26 @@ def main() -> None:
     # -----------------------------
     drop_cols = ["why", "why_1"]
     drop_present = [c for c in drop_cols if c in df_drivers.columns]
+    drop_stats = []
+    n_rows_drivers = len(df_drivers)
+    for c in drop_present:
+        s = df_drivers[c]
+        observed = s.dropna()
+        n_unique = int(observed.nunique())
+        pct_missing = (float(s.isna().sum()) / n_rows_drivers * 100) if n_rows_drivers > 0 else float("nan")
+        if len(observed) > 0:
+            dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
+            dominant_share_txt = f"{dominant_share:.2f}%"
+        else:
+            dominant_share_txt = "NA"
+        pct_missing_txt = f"{pct_missing:.2f}%" if pd.notna(pct_missing) else "NA"
+        drop_stats.append(
+            f"{c}(dominant_share={dominant_share_txt}, n_unique={n_unique}, missing={pct_missing_txt})"
+        )
     df_drivers = df_drivers.drop(columns=drop_present)
 
-    print("Dropped open-ended features:", drop_present)
+    stats_suffix = f" | stats: {'; '.join(drop_stats)}" if drop_stats else ""
+    print(f"Dropped open-ended features: {drop_present}{stats_suffix}")
     print("Drivers shape now:", df_drivers.shape)
 
     # ---------------------------------------------------------------------
@@ -838,16 +857,26 @@ def main() -> None:
             continue
 
         s = df_drivers[col]
+        observed = s.dropna()
         examples = s.value_counts(dropna=False).head(5).index.tolist()
+        if len(observed) > 0:
+            dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
+        else:
+            dominant_share = float("nan")
 
         audit_rows.append({
             "feature": col,
+            "dominant_share_%": round(dominant_share, 2) if pd.notna(dominant_share) else None,
             "example_values": examples,
         })
 
     audit_table = pd.DataFrame(audit_rows)
 
-    print(audit_table)
+    try:
+        from IPython.display import display, HTML
+        display(HTML(audit_table.to_html(index=False)))
+    except Exception:
+        print(audit_table.to_string(index=False))
 
     # ---------------------------------------------------------------------
     # Save drivers
