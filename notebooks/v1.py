@@ -1,10 +1,30 @@
 #%% 00 Config
+
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-#% 01 Rename Columns
+import hashlib
+import itertools
+import json
+import re
+import warnings
+from itertools import combinations
+from typing import Callable, Iterable, List, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import seaborn as sns
+from IPython.display import HTML, Image, display
+from matplotlib import MatplotlibDeprecationWarning
+from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
+from sklearn_extra.cluster import KMedoids
+from umap import UMAP
+
+#%% 01 Rename Columns
 
 RAW_PATH = PROJECT_ROOT / "data" / "raw" / "survey.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
@@ -81,10 +101,7 @@ rename_map = {
 df_renamed = df.rename(columns=rename_map)
 df_renamed.to_csv(OUT_PATH, index=False)
 
-#% 02 Cleaning + Drivers + Overlays
-from typing import Optional, Tuple
-import pandas as pd
-import numpy as np
+#%% 02 Cleaning + Drivers + Overlays
 
 def _log_change(step: str, before: pd.DataFrame, after: pd.DataFrame) -> None:
     """
@@ -287,7 +304,6 @@ def standardize_binary_drivers(df: pd.DataFrame) -> pd.DataFrame:
         df2[col] = df2[col].where(num.isna(), num)
 
     return df2
-import pandas as pd
 
 # Columns used ONLY for interpretation after clustering
 OVERLAY_COLS = [
@@ -316,10 +332,6 @@ def extract_overlays(df: pd.DataFrame) -> pd.DataFrame:
     # keep only columns that actually exist (safe)
     cols = [c for c in OVERLAY_COLS if c in df.columns]
     return df[cols].copy()
-from pathlib import Path
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 
 def show_table(df: pd.DataFrame, title: str, max_rows: int = 25, figsize=(12, 6), dpi=150) -> None:
     if df is None or df.empty:
@@ -352,546 +364,506 @@ def show_table(df: pd.DataFrame, title: str, max_rows: int = 25, figsize=(12, 6)
 IN_PATH = PROJECT_ROOT / "data" / "raw" / "survey_renamed.csv"
 
 
-def main() -> None:
-    # 1) Load renamed dataset
-    df = pd.read_csv(IN_PATH)
+#%% 02A Load + Population Filters
+# 1) Load renamed dataset
+df = pd.read_csv(IN_PATH)
 
-    # ---------------------------------------------------------------------
-    # Consistency check (population filters) WITHOUT touching preprocessing.py
-    # Step 1: keep only not self-employed (0)
-    # Step 2: remove explicit non-tech roles, keep yes + missing
-    # ---------------------------------------------------------------------
-    df_step1 = df[df["self_employed"] == 0].copy()
+# ---------------------------------------------------------------------
+# Consistency check (population filters) WITHOUT touching preprocessing.py
+# Step 1: keep only not self-employed (0)
+# Step 2: remove explicit non-tech roles, keep yes + missing
+# ---------------------------------------------------------------------
+df_step1 = df[df["self_employed"] == 0].copy()
 
-    col = df_step1["tech_role"]
-    if pd.api.types.is_numeric_dtype(col):
-        df_step2_keep_role = df_step1[(col.isna()) | (col != 0)].copy()
+col = df_step1["tech_role"]
+if pd.api.types.is_numeric_dtype(col):
+    df_step2_keep_role = df_step1[(col.isna()) | (col != 0)].copy()
+else:
+    norm = col.astype(str).str.strip().str.lower()
+    df_step2_keep_role = df_step1[(col.isna()) | (norm != "no")].copy()
+
+subset = df_step2_keep_role[df_step2_keep_role["tech_company"] == 0]
+n_non_tech_company = (df_step2_keep_role["tech_company"] == 0).sum()
+n_tech_role_yes = (subset["tech_role"] == 1).sum()
+n_subset = len(subset)
+
+print("\nCheck consistency:")
+print("Rows where tech_company == 0:", n_non_tech_company)
+print("Rows where tech_company == 0 AND tech_role == 1:", n_tech_role_yes)
+# subset size and boolean summary output removed
+
+# ---------------------------------------------------------------------
+# Main cleaning pipeline (drops self_employed and tech_role)
+# ---------------------------------------------------------------------
+df_clean = clean_population_filters(df)
+
+# -----------------------------
+# Add respondent ID (stable row-based)
+# -----------------------------
+
+df_clean = df_clean.reset_index(drop=True)
+df_clean.insert(0, "respondent_id", range(1, len(df_clean) + 1))
+
+
+#%% 02B Row Missingness Summary
+# ---------------------------------------------------------------------
+# Row missingness: summary + histogram
+# ---------------------------------------------------------------------
+row_miss = df_clean.isna().mean(axis=1)
+
+summary = (row_miss.describe()[["min", "max"]] * 100).round(1)
+summary.index = ["min", "max"]
+display(summary.to_frame(name="Row missingness (%)"))
+
+#%% 02C Row Missingness Histogram
+plt.figure(figsize=(8, 5), dpi=150)
+plt.hist(row_miss, bins=20)
+plt.xlabel("Fraction missing per row")
+plt.ylabel("Number of rows")
+plt.title("Row missingness distribution")
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------------------------
+# Column missingness: ONE combined top-15 table + plots
+# ---------------------------------------------------------------------
+n_rows = len(df_clean)
+miss_count = df_clean.isna().sum()
+miss_pct = (miss_count / n_rows) * 100
+
+miss_table = (
+    pd.DataFrame({"missing_count": miss_count, "missing_percent": miss_pct})
+    .query("missing_count > 0")
+    .sort_values("missing_percent", ascending=False)
+    .rename_axis("feature")
+    .reset_index()
+)
+
+top15 = miss_table.head(15).copy()
+# Format % nicely for printing
+top15["missing_percent"] = top15["missing_percent"].map(lambda x: f"{x:.2f}%")
+
+#%% 02D Column Missingness Table
+display(HTML(top15.to_html(index=False)))
+
+#%% 02E Column Missingness Histogram
+# Histogram of column missingness (fractions)
+col_miss = df_clean.isna().mean()
+plt.figure(figsize=(8, 5), dpi=150)
+plt.hist(col_miss, bins=20)
+plt.xlabel("Fraction missing per column")
+plt.ylabel("Number of columns")
+plt.title("Column missingness distribution")
+plt.tight_layout()
+plt.show()
+
+#%% 02F Column Missingness Feature Bars
+# Bar plot: missingness per feature (sorted) — only features with missingness
+col_miss_sorted = col_miss[col_miss > 0].sort_values(ascending=False)
+plt.figure(figsize=(10, 6), dpi=150)
+plt.bar(col_miss_sorted.index, col_miss_sorted.values)
+plt.xticks(rotation=90)
+plt.ylabel("Fraction missing")
+plt.title("Missingness per feature (sorted)")
+plt.tight_layout()
+plt.show()
+
+# -----------------------------
+# Drop columns with 100% missing
+# -----------------------------
+
+rows_before, cols_before = df_clean.shape
+fully_missing_cols = df_clean.columns[df_clean.isna().all()]
+df_clean = df_clean.drop(columns=fully_missing_cols)
+rows_after, cols_after = df_clean.shape
+
+removed_cols = cols_before - cols_after
+print(
+    f"\nRemoved {removed_cols} (100% missingness) columns: "
+    f"(shape {rows_before, cols_before} -> {rows_after, cols_after})"
+)
+
+# ---------------------------------------------------------------------
+# Extract overlays (now guaranteed to include respondent_id)
+# ---------------------------------------------------------------------
+df_overlays = extract_overlays(df_clean)
+
+# Force respondent_id to exist in overlays even if something changes later
+if "respondent_id" not in df_overlays.columns:
+    df_overlays.insert(0, "respondent_id", df_clean["respondent_id"].values)
+
+overlay_path = PROJECT_ROOT / "data" / "out" / "overlays_clean.csv"
+overlay_path.parent.mkdir(parents=True, exist_ok=True)
+df_overlays.to_csv(overlay_path, index=False)
+
+# ---------------------------------------------------------------------
+# Remove overlay columns from drivers BEFORE saving drivers
+# Keep respondent_id in drivers.
+# ---------------------------------------------------------------------
+
+overlay_cols_present = [c for c in OVERLAY_COLS if c in df_clean.columns and c != "respondent_id"]
+df_drivers = df_clean.drop(columns=overlay_cols_present)
+print(f"Dropped overlay columns from drivers (kept respondent_id): {len(overlay_cols_present)}")
+
+# -----------------------------
+# Drop open-ended text features (permanently) FROM DRIVERS
+# -----------------------------
+drop_cols = ["why", "why_1"]
+drop_present = [c for c in drop_cols if c in df_drivers.columns]
+drop_stats = []
+n_rows_drivers = len(df_drivers)
+for c in drop_present:
+    s = df_drivers[c]
+    observed = s.dropna()
+    n_unique = int(observed.nunique())
+    pct_missing = (float(s.isna().sum()) / n_rows_drivers * 100) if n_rows_drivers > 0 else float("nan")
+    if len(observed) > 0:
+        dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
+        dominant_share_txt = f"{dominant_share:.2f}%"
     else:
-        norm = col.astype(str).str.strip().str.lower()
-        df_step2_keep_role = df_step1[(col.isna()) | (norm != "no")].copy()
-
-    subset = df_step2_keep_role[df_step2_keep_role["tech_company"] == 0]
-    n_non_tech_company = (df_step2_keep_role["tech_company"] == 0).sum()
-    n_tech_role_yes = (subset["tech_role"] == 1).sum()
-    n_subset = len(subset)
-
-    print("\nCheck consistency:")
-    print("Rows where tech_company == 0:", n_non_tech_company)
-    print("Rows where tech_company == 0 AND tech_role == 1:", n_tech_role_yes)
-    # subset size and boolean summary output removed
-
-    # ---------------------------------------------------------------------
-    # Main cleaning pipeline (drops self_employed and tech_role)
-    # ---------------------------------------------------------------------
-    df_clean = clean_population_filters(df)
-
-    # -----------------------------
-    # Add respondent ID (stable row-based)
-    # -----------------------------
-
-    df_clean = df_clean.reset_index(drop=True)
-    df_clean.insert(0, "respondent_id", range(1, len(df_clean) + 1))
-
-
-    # ---------------------------------------------------------------------
-    # Row missingness: summary + histogram
-    # ---------------------------------------------------------------------
-    row_miss = df_clean.isna().mean(axis=1)
-
-    summary = (row_miss.describe()[["min", "max"]] * 100).round(1)
-    summary.index = ["min", "max"]
-    try:
-        from IPython.display import display
-        display(summary.to_frame(name="Row missingness (%)"))
-    except Exception:
-        print(summary.to_string())
-
-    plt.figure(figsize=(8, 5), dpi=150)
-    plt.hist(row_miss, bins=20)
-    plt.xlabel("Fraction missing per row")
-    plt.ylabel("Number of rows")
-    plt.title("Row missingness distribution")
-    plt.tight_layout()
-    plt.show()
-
-    # ---------------------------------------------------------------------
-    # Column missingness: ONE combined top-15 table + plots
-    # ---------------------------------------------------------------------
-    n_rows = len(df_clean)
-    miss_count = df_clean.isna().sum()
-    miss_pct = (miss_count / n_rows) * 100
-
-    miss_table = (
-        pd.DataFrame({"missing_count": miss_count, "missing_percent": miss_pct})
-        .query("missing_count > 0")
-        .sort_values("missing_percent", ascending=False)
-        .rename_axis("feature")
-        .reset_index()
+        dominant_share_txt = "NA"
+    pct_missing_txt = f"{pct_missing:.2f}%" if pd.notna(pct_missing) else "NA"
+    drop_stats.append(
+        f"{c}(dominant_share={dominant_share_txt}, n_unique={n_unique}, missing={pct_missing_txt})"
     )
+df_drivers = df_drivers.drop(columns=drop_present)
 
-    top15 = miss_table.head(15).copy()
-    # Format % nicely for printing
-    top15["missing_percent"] = top15["missing_percent"].map(lambda x: f"{x:.2f}%")
+stats_suffix = f" | stats: {'; '.join(drop_stats)}" if drop_stats else ""
+print(f"Dropped open-ended features: {drop_present}{stats_suffix}")
+print("Drivers shape now:", df_drivers.shape)
 
-    try:
-        from IPython.display import display, HTML
-        display(HTML(top15.to_html(index=False)))
-    except Exception:
-        print(top15)
+#%% 02G Driver Audit Table
+# ---------------------------------------------------------------------
+# DRIVER AUDIT TABLE (structure + missingness)
+# ---------------------------------------------------------------------
+rows = []
+for c in df_drivers.columns:
+    if c == "respondent_id":
+        continue
 
-    # Histogram of column missingness (fractions)
-    col_miss = df_clean.isna().mean()
-    plt.figure(figsize=(8, 5), dpi=150)
-    plt.hist(col_miss, bins=20)
-    plt.xlabel("Fraction missing per column")
-    plt.ylabel("Number of columns")
-    plt.title("Column missingness distribution")
-    plt.tight_layout()
-    plt.show()
+    s = df_drivers[c]
+    n = len(s)
 
-    # Bar plot: missingness per feature (sorted) — only features with missingness
-    col_miss_sorted = col_miss[col_miss > 0].sort_values(ascending=False)
-    plt.figure(figsize=(10, 6), dpi=150)
-    plt.bar(col_miss_sorted.index, col_miss_sorted.values)
-    plt.xticks(rotation=90)
-    plt.ylabel("Fraction missing")
-    plt.title("Missingness per feature (sorted)")
-    plt.tight_layout()
-    plt.show()
+    n_missing = s.isna().sum()
+    pct_missing = (n_missing / n) * 100
+    pct_observed = 100 - pct_missing
 
-    # -----------------------------
-    # Drop columns with 100% missing
-    # -----------------------------
+    observed = s.dropna()
+    n_unique = int(observed.nunique())
 
-    rows_before, cols_before = df_clean.shape
-    fully_missing_cols = df_clean.columns[df_clean.isna().all()]
-    df_clean = df_clean.drop(columns=fully_missing_cols)
-    rows_after, cols_after = df_clean.shape
+    if len(observed) > 0:
+        dominant_share = (observed.value_counts().iloc[0] / len(observed)) * 100
+    else:
+        dominant_share = float("nan")
 
-    removed_cols = cols_before - cols_after
-    print(
-        f"\nRemoved {removed_cols} (100% missingness) columns: "
-        f"(shape {rows_before, cols_before} -> {rows_after, cols_after})"
-    )
+    rows.append({
+        "feature": c,
+        "% observed": round(pct_observed, 2),
+        "% missing": round(pct_missing, 2),
+        "n_unique": n_unique,
+        "dominant_share_%": round(dominant_share, 2) if pd.notna(dominant_share) else None,
+    })
 
-    # ---------------------------------------------------------------------
-    # Extract overlays (now guaranteed to include respondent_id)
-    # ---------------------------------------------------------------------
-    df_overlays = extract_overlays(df_clean)
+audit_df = pd.DataFrame(rows).sort_values("% missing", ascending=False).reset_index(drop=True)
 
-    # Force respondent_id to exist in overlays even if something changes later
-    if "respondent_id" not in df_overlays.columns:
-        df_overlays.insert(0, "respondent_id", df_clean["respondent_id"].values)
+# Show only features with any missingness (matches requested view) as text table
+audit_missing = audit_df[audit_df["% missing"] > 0].reset_index(drop=True)
+display(HTML(audit_missing.to_html(index=False)))
 
-    overlay_path = PROJECT_ROOT / "data" / "out" / "overlays_clean.csv"
-    overlay_path.parent.mkdir(parents=True, exist_ok=True)
-    df_overlays.to_csv(overlay_path, index=False)
+# ---------------------------------------------------------------------
+# MISSINGNESS CORRELATION (pairs) - also show as table image
+# ---------------------------------------------------------------------
+miss = df_drivers.drop(columns=["respondent_id"], errors="ignore").isna().astype(int)
+corr = miss.corr()
 
-    # ---------------------------------------------------------------------
-    # Remove overlay columns from drivers BEFORE saving drivers
-    # Keep respondent_id in drivers.
-    # ---------------------------------------------------------------------
+pairs = []
+cols = list(corr.columns)
+for i in range(len(cols)):
+    for j in range(i + 1, len(cols)):
+        val = corr.iloc[i, j]
+        if pd.notna(val) and abs(val) >= 0.95:
+            pairs.append({"feature_1": cols[i], "feature_2": cols[j], "corr": round(val, 3)})
 
-    overlay_cols_present = [c for c in OVERLAY_COLS if c in df_clean.columns and c != "respondent_id"]
-    df_drivers = df_clean.drop(columns=overlay_cols_present)
-    print(f"Dropped overlay columns from drivers (kept respondent_id): {len(overlay_cols_present)}")
+corr_pairs_df = pd.DataFrame(pairs).sort_values("corr", ascending=False).reset_index(drop=True)
 
-    # -----------------------------
-    # Drop open-ended text features (permanently) FROM DRIVERS
-    # -----------------------------
-    drop_cols = ["why", "why_1"]
-    drop_present = [c for c in drop_cols if c in df_drivers.columns]
-    drop_stats = []
-    n_rows_drivers = len(df_drivers)
-    for c in drop_present:
-        s = df_drivers[c]
-        observed = s.dropna()
-        n_unique = int(observed.nunique())
-        pct_missing = (float(s.isna().sum()) / n_rows_drivers * 100) if n_rows_drivers > 0 else float("nan")
-        if len(observed) > 0:
-            dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
-            dominant_share_txt = f"{dominant_share:.2f}%"
-        else:
-            dominant_share_txt = "NA"
-        pct_missing_txt = f"{pct_missing:.2f}%" if pd.notna(pct_missing) else "NA"
-        drop_stats.append(
-            f"{c}(dominant_share={dominant_share_txt}, n_unique={n_unique}, missing={pct_missing_txt})"
+# Strong missingness-correlation pairs table removed per request
+
+# Contingency table for benefits and mh_options_known
+
+# take columns
+b = df_drivers["benefits"]
+c = df_drivers["mh_options_known"]
+
+# make copies as strings so we can label missing explicitly
+b2 = b.copy()
+c2 = c.copy()
+
+# label true NaN clearly
+b2 = b2.astype(object)
+c2 = c2.astype(object)
+
+b2[b2.isna()] = "NaN"
+c2[c2.isna()] = "NaN"
+
+# optional: clean string "nan" if exists
+b2 = b2.astype(str).str.strip()
+c2 = c2.astype(str).str.strip()
+
+# build full contingency table
+full_ct = pd.crosstab(
+    b2,
+    c2,
+    dropna=False
+)
+
+#%% 02H Skip-Logic Contingency Tables
+display(HTML("<b>Contingency table (raw)</b>" + full_ct.to_html()))
+
+# apply parent-child question changes
+df_drivers = apply_driver_skip_logic(df_drivers)
+
+
+# contigency table after applying rule C and enforcing 'non applicable'
+ct_after = pd.crosstab(
+    df_drivers["benefits"],
+    df_drivers["mh_options_known"],
+    dropna=False
+)
+
+display(HTML("<b>Contingency table (after Rule C)</b>" + ct_after.to_html()))
+
+
+# ============================================================
+# PROOF TABLES (post skip-logic)  <-- place AFTER apply_driver_skip_logic
+# ============================================================
+NA_TOKEN = "Not applicable"
+
+# ---------- Helper to compute proof metrics ----------
+def _rule_metrics(rule_name: str, parent_mask_false: pd.Series, child: pd.Series) -> dict:
+    n_false = int(parent_mask_false.sum())
+    na = int((parent_mask_false & (child == NA_TOKEN)).sum())
+    nan = int((parent_mask_false & child.isna()).sum())
+    other = int((parent_mask_false & (~child.isna()) & (child != NA_TOKEN)).sum())
+
+    # PASS condition: in "does-not-apply" rows -> all NA_TOKEN, no NaN, no other
+    pass_fill = (n_false == 0) or (na == n_false and nan == 0 and other == 0)
+
+    return {
+        "rule": rule_name,
+        "rows_where_not_applicable": n_false,
+        "NA_token_count": na,
+        "NaN_count": nan,
+        "Other_value_count": other,
+        "PASS": bool(pass_fill),
+    }
+
+proof_metrics = []
+proof_failures = []
+
+# ---------- Rule A: prev_boss -> prev_* ----------
+prev_children = [
+    "prev_benefits",
+    "prev_mh_options_known",
+    "prev_boss_mh_discuss",
+    "prev_resources",
+    "prev_anonymity_protected",
+    "bad_conseq_mh_prev_boss",
+    "bad_conseq_ph_prev_boss",
+    "mh_comfort_prev_coworkers",
+    "mh_comfort_prev_supervisor",
+    "mh_ph_prev_boss_serious",
+    "prev_observed_bad_conseq_mh",
+]
+
+if "prev_boss" in df_drivers.columns:
+    p = df_drivers["prev_boss"].astype(str).str.strip()
+    mask_no_prev = p.isin(["0", "0.0"])
+
+    for c in [x for x in prev_children if x in df_drivers.columns]:
+        m = _rule_metrics("prev_boss==0 -> prev_* = NA_TOKEN", mask_no_prev, df_drivers[c])
+        m["child"] = c
+        proof_metrics.append(m)
+        if not m["PASS"]:
+            proof_failures.append(m)
+
+# ---------- Rule B: ever_observed_mhd_bad_response -> mhdcoworker_you_not_reveal ----------
+# Your CURRENT rule: ONLY "No" makes child Not applicable (not "nan")
+if "ever_observed_mhd_bad_response" in df_drivers.columns and "mhdcoworker_you_not_reveal" in df_drivers.columns:
+    p = df_drivers["ever_observed_mhd_bad_response"].astype(str).str.strip()
+    mask_not_app = p.eq("No")
+
+    m = _rule_metrics('ever_observed_mhd_bad_response=="No" -> child = NA_TOKEN',
+                      mask_not_app,
+                      df_drivers["mhdcoworker_you_not_reveal"])
+    m["child"] = "mhdcoworker_you_not_reveal"
+    proof_metrics.append(m)
+    if not m["PASS"]:
+        proof_failures.append(m)
+
+# ---------- Rule C: benefits -> mh_options_known ----------
+# If benefits in {"No", "Not eligible for coverage / N/A"} -> mh_options_known = NA_TOKEN
+if "benefits" in df_drivers.columns and "mh_options_known" in df_drivers.columns:
+    p = df_drivers["benefits"].astype(str).str.strip()
+    mask_not_app = p.isin(["No", "Not eligible for coverage / N/A"])
+
+    m = _rule_metrics('benefits in {"No","Not eligible..."} -> mh_options_known = NA_TOKEN',
+                      mask_not_app,
+                      df_drivers["mh_options_known"])
+    m["child"] = "mh_options_known"
+    proof_metrics.append(m)
+    if not m["PASS"]:
+        proof_failures.append(m)
+
+# ---------- TABLE 1A: proof metrics (always show; report-friendly) ----------
+proof_metrics_df = pd.DataFrame(proof_metrics)
+
+if proof_metrics_df.empty:
+    print("\nStructural missingness proof — INFO")
+    print("No skip-logic rules matched columns in df_drivers (nothing to prove).")
+
+# ---------- TABLE 1B: failures only (only if needed) ----------
+fail_df = pd.DataFrame(proof_failures)
+
+# ---------- TABLE 2: TRUE missingness only (NaN), no redundancy ----------
+drivers = df_drivers.drop(columns=["respondent_id"], errors="ignore")
+n = len(drivers)
+
+miss_nan = drivers.isna().sum()
+miss_nan = miss_nan[miss_nan > 0].sort_values(ascending=False)
+
+if miss_nan.empty:
+    show_table(
+        pd.DataFrame([{
+            "result": "PASS",
+            "message": "No TRUE NaN missingness remains in drivers after skip-logic."
+        }]),
+        "True missingness (NaN only) — PASS",
+        max_rows=5,
+        figsize=(12, 2.5)
         )
-    df_drivers = df_drivers.drop(columns=drop_present)
+else:
+    true_miss_df = pd.DataFrame({
+        "feature": miss_nan.index,
+        "missing_count": miss_nan.values,
+        "missing_%": (miss_nan.values / n * 100).round(2),
+    }).reset_index(drop=True)
 
-    stats_suffix = f" | stats: {'; '.join(drop_stats)}" if drop_stats else ""
-    print(f"Dropped open-ended features: {drop_present}{stats_suffix}")
-    print("Drivers shape now:", df_drivers.shape)
+    display(HTML(true_miss_df.to_html(index=False)))
 
-    # ---------------------------------------------------------------------
-    # DRIVER AUDIT TABLE (structure + missingness)
-    # ---------------------------------------------------------------------
-    rows = []
-    for c in df_drivers.columns:
-        if c == "respondent_id":
-            continue
+    # Dependency situation (NO threshold): show top 20 |corr| among NaN indicators
+    miss_bin = drivers[miss_nan.index].isna().astype(int)
 
-        s = df_drivers[c]
-        n = len(s)
-
-        n_missing = s.isna().sum()
-        pct_missing = (n_missing / n) * 100
-        pct_observed = 100 - pct_missing
-
-        observed = s.dropna()
-        n_unique = int(observed.nunique())
-
-        if len(observed) > 0:
-            dominant_share = (observed.value_counts().iloc[0] / len(observed)) * 100
-        else:
-            dominant_share = float("nan")
-
-        rows.append({
-            "feature": c,
-            "% observed": round(pct_observed, 2),
-            "% missing": round(pct_missing, 2),
-            "n_unique": n_unique,
-            "dominant_share_%": round(dominant_share, 2) if pd.notna(dominant_share) else None,
-        })
-
-    audit_df = pd.DataFrame(rows).sort_values("% missing", ascending=False).reset_index(drop=True)
-
-    # Show only features with any missingness (matches requested view) as text table
-    audit_missing = audit_df[audit_df["% missing"] > 0].reset_index(drop=True)
-    try:
-        from IPython.display import display, HTML
-        display(HTML(audit_missing.to_html(index=False)))
-    except Exception:
-        print(audit_missing.to_string(index=False))
-
-    # ---------------------------------------------------------------------
-    # MISSINGNESS CORRELATION (pairs) - also show as table image
-    # ---------------------------------------------------------------------
-    miss = df_drivers.drop(columns=["respondent_id"], errors="ignore").isna().astype(int)
-    corr = miss.corr()
-
-    pairs = []
-    cols = list(corr.columns)
-    for i in range(len(cols)):
-        for j in range(i + 1, len(cols)):
-            val = corr.iloc[i, j]
-            if pd.notna(val) and abs(val) >= 0.95:
-                pairs.append({"feature_1": cols[i], "feature_2": cols[j], "corr": round(val, 3)})
-
-    corr_pairs_df = pd.DataFrame(pairs).sort_values("corr", ascending=False).reset_index(drop=True)
-
-    # Strong missingness-correlation pairs table removed per request
-
-    # Contingency table for benefits and mh_options_known
-
-    # take columns
-    b = df_drivers["benefits"]
-    c = df_drivers["mh_options_known"]
-
-    # make copies as strings so we can label missing explicitly
-    b2 = b.copy()
-    c2 = c.copy()
-
-    # label true NaN clearly
-    b2 = b2.astype(object)
-    c2 = c2.astype(object)
-
-    b2[b2.isna()] = "NaN"
-    c2[c2.isna()] = "NaN"
-
-    # optional: clean string "nan" if exists
-    b2 = b2.astype(str).str.strip()
-    c2 = c2.astype(str).str.strip()
-
-    # build full contingency table
-    full_ct = pd.crosstab(
-        b2,
-        c2,
-        dropna=False
-    )
-
-    try:
-        from IPython.display import display, HTML
-        display(HTML("<b>Contingency table (raw)</b>" + full_ct.to_html()))
-    except Exception:
-        print(full_ct)
-
-    # apply parent-child question changes
-    df_drivers = apply_driver_skip_logic(df_drivers)
-
-
-    # contigency table after applying rule C and enforcing 'non applicable'
-    ct_after = pd.crosstab(
-        df_drivers["benefits"],
-        df_drivers["mh_options_known"],
-        dropna=False
-    )
-
-    try:
-        from IPython.display import display, HTML
-        display(HTML("<b>Contingency table (after Rule C)</b>" + ct_after.to_html()))
-    except Exception:
-        print(ct_after)
-
-
-    # ============================================================
-    # PROOF TABLES (post skip-logic)  <-- place AFTER apply_driver_skip_logic
-    # ============================================================
-    NA_TOKEN = "Not applicable"
-
-    # ---------- Helper to compute proof metrics ----------
-    def _rule_metrics(rule_name: str, parent_mask_false: pd.Series, child: pd.Series) -> dict:
-        n_false = int(parent_mask_false.sum())
-        na = int((parent_mask_false & (child == NA_TOKEN)).sum())
-        nan = int((parent_mask_false & child.isna()).sum())
-        other = int((parent_mask_false & (~child.isna()) & (child != NA_TOKEN)).sum())
-
-        # PASS condition: in "does-not-apply" rows -> all NA_TOKEN, no NaN, no other
-        pass_fill = (n_false == 0) or (na == n_false and nan == 0 and other == 0)
-
-        return {
-            "rule": rule_name,
-            "rows_where_not_applicable": n_false,
-            "NA_token_count": na,
-            "NaN_count": nan,
-            "Other_value_count": other,
-            "PASS": bool(pass_fill),
-        }
-
-    proof_metrics = []
-    proof_failures = []
-
-    # ---------- Rule A: prev_boss -> prev_* ----------
-    prev_children = [
-        "prev_benefits",
-        "prev_mh_options_known",
-        "prev_boss_mh_discuss",
-        "prev_resources",
-        "prev_anonymity_protected",
-        "bad_conseq_mh_prev_boss",
-        "bad_conseq_ph_prev_boss",
-        "mh_comfort_prev_coworkers",
-        "mh_comfort_prev_supervisor",
-        "mh_ph_prev_boss_serious",
-        "prev_observed_bad_conseq_mh",
-    ]
-
-    if "prev_boss" in df_drivers.columns:
-        p = df_drivers["prev_boss"].astype(str).str.strip()
-        mask_no_prev = p.isin(["0", "0.0"])
-
-        for c in [x for x in prev_children if x in df_drivers.columns]:
-            m = _rule_metrics("prev_boss==0 -> prev_* = NA_TOKEN", mask_no_prev, df_drivers[c])
-            m["child"] = c
-            proof_metrics.append(m)
-            if not m["PASS"]:
-                proof_failures.append(m)
-
-    # ---------- Rule B: ever_observed_mhd_bad_response -> mhdcoworker_you_not_reveal ----------
-    # Your CURRENT rule: ONLY "No" makes child Not applicable (not "nan")
-    if "ever_observed_mhd_bad_response" in df_drivers.columns and "mhdcoworker_you_not_reveal" in df_drivers.columns:
-        p = df_drivers["ever_observed_mhd_bad_response"].astype(str).str.strip()
-        mask_not_app = p.eq("No")
-
-        m = _rule_metrics('ever_observed_mhd_bad_response=="No" -> child = NA_TOKEN',
-                          mask_not_app,
-                          df_drivers["mhdcoworker_you_not_reveal"])
-        m["child"] = "mhdcoworker_you_not_reveal"
-        proof_metrics.append(m)
-        if not m["PASS"]:
-            proof_failures.append(m)
-
-    # ---------- Rule C: benefits -> mh_options_known ----------
-    # If benefits in {"No", "Not eligible for coverage / N/A"} -> mh_options_known = NA_TOKEN
-    if "benefits" in df_drivers.columns and "mh_options_known" in df_drivers.columns:
-        p = df_drivers["benefits"].astype(str).str.strip()
-        mask_not_app = p.isin(["No", "Not eligible for coverage / N/A"])
-
-        m = _rule_metrics('benefits in {"No","Not eligible..."} -> mh_options_known = NA_TOKEN',
-                          mask_not_app,
-                          df_drivers["mh_options_known"])
-        m["child"] = "mh_options_known"
-        proof_metrics.append(m)
-        if not m["PASS"]:
-            proof_failures.append(m)
-
-    # ---------- TABLE 1A: proof metrics (always show; report-friendly) ----------
-    proof_metrics_df = pd.DataFrame(proof_metrics)
-
-    if proof_metrics_df.empty:
-        print("\nStructural missingness proof — INFO")
-        print("No skip-logic rules matched columns in df_drivers (nothing to prove).")
-    else:
-        # Structural missingness proof table removed per request
-        pass
-
-    # ---------- TABLE 1B: failures only (only if needed) ----------
-    fail_df = pd.DataFrame(proof_failures)
-    if not fail_df.empty:
-        # Failures table removed per request
-        pass
-
-    # ---------- TABLE 2: TRUE missingness only (NaN), no redundancy ----------
-    drivers = df_drivers.drop(columns=["respondent_id"], errors="ignore")
-    n = len(drivers)
-
-    miss_nan = drivers.isna().sum()
-    miss_nan = miss_nan[miss_nan > 0].sort_values(ascending=False)
-
-    if miss_nan.empty:
+    if miss_bin.shape[1] < 2:
         show_table(
             pd.DataFrame([{
-                "result": "PASS",
-                "message": "No TRUE NaN missingness remains in drivers after skip-logic."
+                "result": "INFO",
+                "message": "Only one truly-missing feature -> no dependency pairs exist."
             }]),
-            "True missingness (NaN only) — PASS",
+            "True-missingness dependencies",
             max_rows=5,
             figsize=(12, 2.5)
         )
+
+#%% 02I Feature Type Audit
+# ============================================================
+# Handle TRUE missingness after structural skip-logic
+# ============================================================
+
+# 1) Recode true missingness as explicit "No response"
+# for sensitive categorical features
+
+true_missing_to_no_response = [
+    "ever_observed_mhd_bad_response",
+    "mhdcoworker_you_not_reveal",
+]
+
+for col in true_missing_to_no_response:
+    if col in df_drivers.columns:
+        df_drivers[col] = df_drivers[col].fillna("No response")
+
+# ------------------------------------------------------------
+# 2) imputation for mh_options_known (very low missingness)
+#    Only within applicable population (benefits = I dont know)
+# ------------------------------------------------------------
+# Fix remaining true missingness in mh_options_known
+# (these occur only when benefits == "I don't know")
+
+if "mh_options_known" in df_drivers.columns:
+    df_drivers["mh_options_known"] = df_drivers["mh_options_known"].fillna("No")
+
+# ============================================================
+# Standardize binary drivers to strict 0/1 integers
+# ============================================================
+
+binary_cols = ["tech_company", "prev_boss", "observed_mhdcoworker_bad_conseq"]
+
+for col in binary_cols:
+    if col not in df_drivers.columns:
+        continue
+
+    # If already numeric 0/1 (possibly floats), just cast safely
+    if pd.api.types.is_numeric_dtype(df_drivers[col]):
+        df_drivers[col] = df_drivers[col].astype(int)
+
     else:
-        true_miss_df = pd.DataFrame({
-            "feature": miss_nan.index,
-            "missing_count": miss_nan.values,
-            "missing_%": (miss_nan.values / n * 100).round(2),
-        }).reset_index(drop=True)
+        # If text Yes/No appears, map it
+        s = df_drivers[col].astype(str).str.strip().str.lower()
+        mapping = {"yes": 1, "no": 0, "1": 1, "0": 0, "1.0": 1, "0.0": 0}
+        df_drivers[col] = s.map(mapping)
 
-        try:
-            from IPython.display import display, HTML
-            display(HTML(true_miss_df.to_html(index=False)))
-        except Exception:
-            print(true_miss_df.to_string(index=False))
+        df_drivers[col] = df_drivers[col].astype(int)
 
-        # Dependency situation (NO threshold): show top 20 |corr| among NaN indicators
-        miss_bin = drivers[miss_nan.index].isna().astype(int)
+# AFTER: confirm binaries are now int 0/1
+# binary check prints removed
 
-        if miss_bin.shape[1] >= 2:
-            # dependencies print removed
-            pass
-        else:
-            show_table(
-                pd.DataFrame([{
-                    "result": "INFO",
-                    "message": "Only one truly-missing feature -> no dependency pairs exist."
-                }]),
-                "True-missingness dependencies",
-                max_rows=5,
-                figsize=(12, 2.5)
-            )
+# ============================================================
+# POST-FIX VALIDATION CHECKS
+# ============================================================
 
-    # ============================================================
-    # Handle TRUE missingness after structural skip-logic
-    # ============================================================
+# POST-FIX VALIDATION prints removed by request
 
-    # 1) Recode true missingness as explicit "No response"
-    # for sensitive categorical features
+# feature type audit
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 200)
 
-    true_missing_to_no_response = [
-        "ever_observed_mhd_bad_response",
-        "mhdcoworker_you_not_reveal",
-    ]
+print("\n=== FEATURE TYPE AUDIT ===")
 
-    for col in true_missing_to_no_response:
-        if col in df_drivers.columns:
-            df_drivers[col] = df_drivers[col].fillna("No response")
+audit_rows = []
 
-    # ------------------------------------------------------------
-    # 2) imputation for mh_options_known (very low missingness)
-    #    Only within applicable population (benefits = I dont know)
-    # ------------------------------------------------------------
-    # Fix remaining true missingness in mh_options_known
-    # (these occur only when benefits == "I don't know")
+for col in df_drivers.columns:
+    if col == "respondent_id":
+        continue
 
-    if "mh_options_known" in df_drivers.columns:
-        df_drivers["mh_options_known"] = df_drivers["mh_options_known"].fillna("No")
+    s = df_drivers[col]
+    observed = s.dropna()
+    examples = s.value_counts(dropna=False).head(5).index.tolist()
+    if len(observed) > 0:
+        dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
+    else:
+        dominant_share = float("nan")
 
-    # ============================================================
-    # Standardize binary drivers to strict 0/1 integers
-    # ============================================================
+    audit_rows.append({
+        "feature": col,
+        "dominant_share_%": round(dominant_share, 2) if pd.notna(dominant_share) else None,
+        "example_values": examples,
+    })
 
-    binary_cols = ["tech_company", "prev_boss", "observed_mhdcoworker_bad_conseq"]
+audit_table = pd.DataFrame(audit_rows)
 
-    for col in binary_cols:
-        if col not in df_drivers.columns:
-            continue
+display(HTML(audit_table.to_html(index=False)))
 
-        # If already numeric 0/1 (possibly floats), just cast safely
-        if pd.api.types.is_numeric_dtype(df_drivers[col]):
-            # Optional safety check: ensure only {0,1}
-            bad = ~df_drivers[col].isin([0, 1, 0.0, 1.0])
-            if bad.any():
-                raise ValueError(f"{col} has non-binary numeric values: {df_drivers.loc[bad, col].unique()}")
-            df_drivers[col] = df_drivers[col].astype(int)
-
-        else:
-            # If text Yes/No appears, map it
-            s = df_drivers[col].astype(str).str.strip().str.lower()
-            mapping = {"yes": 1, "no": 0, "1": 1, "0": 0, "1.0": 1, "0.0": 0}
-            df_drivers[col] = s.map(mapping)
-
-            if df_drivers[col].isna().any():
-                bad_vals = df_drivers.loc[df_drivers[col].isna(), col].unique()
-                raise ValueError(f"{col} has unmapped values: {bad_vals}")
-
-            df_drivers[col] = df_drivers[col].astype(int)
-
-    # AFTER: confirm binaries are now int 0/1
-    # binary check prints removed
-
-    # ============================================================
-    # POST-FIX VALIDATION CHECKS
-    # ============================================================
-
-    # POST-FIX VALIDATION prints removed by request
-
-    # feature type audit
-    pd.set_option("display.max_colwidth", None)
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.width", 200)
-
-    print("\n=== FEATURE TYPE AUDIT ===")
-
-    audit_rows = []
-
-    for col in df_drivers.columns:
-        if col == "respondent_id":
-            continue
-
-        s = df_drivers[col]
-        observed = s.dropna()
-        examples = s.value_counts(dropna=False).head(5).index.tolist()
-        if len(observed) > 0:
-            dominant_share = float(observed.value_counts(normalize=True).iloc[0] * 100)
-        else:
-            dominant_share = float("nan")
-
-        audit_rows.append({
-            "feature": col,
-            "dominant_share_%": round(dominant_share, 2) if pd.notna(dominant_share) else None,
-            "example_values": examples,
-        })
-
-    audit_table = pd.DataFrame(audit_rows)
-
-    try:
-        from IPython.display import display, HTML
-        display(HTML(audit_table.to_html(index=False)))
-    except Exception:
-        print(audit_table.to_string(index=False))
-
-    # ---------------------------------------------------------------------
-    # Save drivers
-    # ---------------------------------------------------------------------
-    out_path = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df_drivers.to_csv(out_path, index=False)
-    # saved drivers message removed
+# ---------------------------------------------------------------------
+# Save drivers
+# ---------------------------------------------------------------------
+out_path = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
+out_path.parent.mkdir(parents=True, exist_ok=True)
+df_drivers.to_csv(out_path, index=False)
+# saved drivers message removed
 
 
-main()
 
 #%% 03 Encoding
-from pathlib import Path
-import pandas as pd
 
 IN_PATH = PROJECT_ROOT / "data" / "out" / "survey_drivers.csv"
 OUT_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
@@ -903,12 +875,6 @@ _ = IN_PATH.exists()
 # -------------------
 NA_TOKEN = "Not applicable"
 IDK_TOKEN = "I don't know"
-
-
-def assert_binary_01(s: pd.Series, name: str) -> None:
-    bad = ~s.isin([0, 1])
-    if bad.any():
-        raise ValueError(f"{name} has non 0/1 values: {sorted(s[bad].unique().tolist())}")
 
 
 def norm_str(x):
@@ -925,11 +891,6 @@ def encode_ordinal(series: pd.Series, mapping: dict, name: str) -> pd.Series:
     """
     s = series.map(norm_str).astype("string")
     enc = s.map(mapping)
-
-    bad_mask = s.notna() & enc.isna()
-    if bad_mask.any():
-        bad_vals = sorted(s[bad_mask].unique().tolist())
-        raise ValueError(f"{name}: unmapped categories found: {bad_vals}")
 
     return enc.astype("float")
 
@@ -964,11 +925,6 @@ def encode_company_size(series: pd.Series) -> pd.Series:
     """
     s_num = pd.to_numeric(series, errors="coerce")
     if s_num.notna().any():
-        allowed = set(range(1, 7))
-        bad = s_num.notna() & (~s_num.isin(list(allowed)))
-        if bad.any():
-            bad_vals = sorted(s_num[bad].unique().tolist())
-            raise ValueError(f"company_size numeric values outside {sorted(list(allowed))}: {bad_vals}")
         return s_num.astype("float")
 
     return encode_ordinal(series, ORDINAL_MAPS["company_size"], "company_size")
@@ -1256,224 +1212,213 @@ MIXED_SPECS_V2 = {
 }
 
 
-def main() -> None:
-    df = pd.read_csv(IN_PATH)
+df = pd.read_csv(IN_PATH)
 
-    if "respondent_id" not in df.columns:
-        raise ValueError("survey_drivers.csv must contain respondent_id")
+# input shape prints removed
 
-    # input shape prints removed
+# -------------------
+# 1) Binary
+# -------------------
+binary_cols = ["tech_company", "prev_boss", "observed_mhdcoworker_bad_conseq"]
+binary_cols = [c for c in binary_cols if c in df.columns]
 
-    # -------------------
-    # 1) Binary
-    # -------------------
-    binary_cols = ["tech_company", "prev_boss", "observed_mhdcoworker_bad_conseq"]
-    binary_cols = [c for c in binary_cols if c in df.columns]
+for c in binary_cols:
+    df[c] = pd.to_numeric(df[c], errors="raise")
 
-    for c in binary_cols:
-        df[c] = pd.to_numeric(df[c], errors="raise")
-        assert_binary_01(df[c], c)
+out = pd.DataFrame({"respondent_id": df["respondent_id"]})
+for c in binary_cols:
+    out[c] = df[c].astype(int)
 
-    out = pd.DataFrame({"respondent_id": df["respondent_id"]})
-    for c in binary_cols:
-        out[c] = df[c].astype(int)
+# after-binary prints removed
 
-    # after-binary prints removed
+# -------------------
+# 2) Nominal (one-hot)
+# -------------------
+nominal_cols = [
+    "anonymity_protected",
+    "mh_family_history",
+    "mh_ph_boss_serious",
+    "boss_mh_discuss",
+    "resources",
+    "benefits",
+    "mh_options_known",
+    "mhdcoworker_you_not_reveal",
+]
+nominal_cols = [c for c in nominal_cols if c in df.columns]
 
-    # -------------------
-    # 2) Nominal (one-hot)
-    # -------------------
-    nominal_cols = [
-        "anonymity_protected",
-        "mh_family_history",
-        "mh_ph_boss_serious",
-        "boss_mh_discuss",
-        "resources",
-        "benefits",
-        "mh_options_known",
-        "mhdcoworker_you_not_reveal",
-    ]
-    nominal_cols = [c for c in nominal_cols if c in df.columns]
+# nominal input prints removed
 
-    # nominal input prints removed
+X_nom = df[nominal_cols].copy()
+X_nom = X_nom.fillna("NaN")
+for c in nominal_cols:
+    X_nom[c] = X_nom[c].astype(str).str.strip()
 
-    X_nom = df[nominal_cols].copy()
-    X_nom = X_nom.fillna("NaN")
-    for c in nominal_cols:
-        X_nom[c] = X_nom[c].astype(str).str.strip()
+nom_dum = pd.get_dummies(X_nom, prefix=nominal_cols, prefix_sep="=")
 
-    nom_dum = pd.get_dummies(X_nom, prefix=nominal_cols, prefix_sep="=")
+# nominal one-hot detail prints removed
 
-    # nominal one-hot detail prints removed
+cols_before = out.shape[1]
+out = out.join(nom_dum)
+# after nominal prints removed
 
-    cols_before = out.shape[1]
-    out = out.join(nom_dum)
-    # after nominal prints removed
+# -------------------
+# 3) Ordinal
+# -------------------
+# ordinal input prints removed
+ordinal_cols = [
+    "company_size",
+    "remote_work",
+    "ph_interview",
+    "mh_interview",
+    "bad_conseq_mh_boss",
+    "bad_conseq_ph_boss",
+    "mh_comfort_coworkers",
+    "mh_comfort_supervisor",
+]
+ordinal_cols = [c for c in ordinal_cols if c in df.columns]
 
-    # -------------------
-    # 3) Ordinal
-    # -------------------
-    # ordinal input prints removed
-    ordinal_cols = [
-        "company_size",
-        "remote_work",
-        "ph_interview",
-        "mh_interview",
-        "bad_conseq_mh_boss",
-        "bad_conseq_ph_boss",
-        "mh_comfort_coworkers",
-        "mh_comfort_supervisor",
-    ]
-    ordinal_cols = [c for c in ordinal_cols if c in df.columns]
+# ordinal input prints removed
 
-    # ordinal input prints removed
+ord_out = pd.DataFrame(index=df.index)
 
-    ord_out = pd.DataFrame(index=df.index)
+for c in ordinal_cols:
+    if c == "company_size":
+        raw_vals = sorted(df["company_size"].dropna().astype(str).map(norm_str).unique().tolist())
+        ord_out["company_size_ord"] = encode_company_size(df["company_size"])
+    else:
+        mapping = ORDINAL_MAPS[c]
+        s = df[c].map(norm_str).astype("string")
+        ord_out[f"{c}_ord"] = encode_ordinal(df[c], mapping, c)
 
-    for c in ordinal_cols:
-        if c == "company_size":
-            raw_vals = sorted(df["company_size"].dropna().astype(str).map(norm_str).unique().tolist())
-            ord_out["company_size_ord"] = encode_company_size(df["company_size"])
-        else:
-            mapping = ORDINAL_MAPS[c]
-            s = df[c].map(norm_str).astype("string")
-            ord_out[f"{c}_ord"] = encode_ordinal(df[c], mapping, c)
+cols_before = out.shape[1]
+out = out.join(ord_out)
 
-    cols_before = out.shape[1]
-    out = out.join(ord_out)
+# after ordinal prints removed
 
-    # after ordinal prints removed
+# -------------------
+# 4) Mixed (v1): ordinal + (NA/IDK) flags
+# -------------------
+# mixed v1 input prints removed
 
-    # -------------------
-    # 4) Mixed (v1): ordinal + (NA/IDK) flags
-    # -------------------
-    # mixed v1 input prints removed
+mixed_cols = [c for c in MIXED_SPECS.keys() if c in df.columns]
+# mixed v1 input prints removed
 
-    mixed_cols = [c for c in MIXED_SPECS.keys() if c in df.columns]
-    # mixed v1 input prints removed
+mixed_out = pd.DataFrame(index=df.index)
 
-    mixed_out = pd.DataFrame(index=df.index)
+for c in mixed_cols:
+    spec = MIXED_SPECS[c]
+    raw = df[c].map(norm_str).astype("string")
+    obs = sorted(raw.dropna().unique().tolist())
 
-    for c in mixed_cols:
-        spec = MIXED_SPECS[c]
-        raw = df[c].map(norm_str).astype("string")
-        obs = sorted(raw.dropna().unique().tolist())
+    enc_block = encode_mixed_ord_plus_flags(
+        df=df,
+        feature=c,
+        ord_mapping=spec["ord_mapping"],
+        na_tokens=spec["na_tokens"],
+        idk_tokens=spec["idk_tokens"],
+        collapse_map=spec["collapse_map"],
+        drop_all_zero_flags=True,
+    )
 
-        enc_block = encode_mixed_ord_plus_flags(
-            df=df,
-            feature=c,
-            ord_mapping=spec["ord_mapping"],
-            na_tokens=spec["na_tokens"],
-            idk_tokens=spec["idk_tokens"],
-            collapse_map=spec["collapse_map"],
-            drop_all_zero_flags=True,
-        )
+    # mixed v1 detail prints removed
 
-        # mixed v1 detail prints removed
+    mixed_out = mixed_out.join(enc_block)
 
-        mixed_out = mixed_out.join(enc_block)
+cols_before = out.shape[1]
+out = out.join(mixed_out)
 
-    cols_before = out.shape[1]
-    out = out.join(mixed_out)
+# after mixed v1 prints removed
 
-    # after mixed v1 prints removed
+# -------------------
+# 5) Mixed (v2): ordinal + TWO nominal flags (plus optional extra flags)
+#     (inspected separately, as requested)
+# -------------------
+# mixed v2 input prints removed
 
-    # -------------------
-    # 5) Mixed (v2): ordinal + TWO nominal flags (plus optional extra flags)
-    #     (inspected separately, as requested)
-    # -------------------
-    # mixed v2 input prints removed
+mixed_v2_cols = [c for c in MIXED_SPECS_V2.keys() if c in df.columns]
+# mixed v2 input prints removed
 
-    mixed_v2_cols = [c for c in MIXED_SPECS_V2.keys() if c in df.columns]
-    # mixed v2 input prints removed
+mixed_v2_out = pd.DataFrame(index=df.index)
 
-    mixed_v2_out = pd.DataFrame(index=df.index)
+for c in mixed_v2_cols:
+    spec = MIXED_SPECS_V2[c]
+    raw = df[c].map(norm_str).astype("string")
+    obs = sorted(raw.dropna().unique().tolist())
 
-    for c in mixed_v2_cols:
-        spec = MIXED_SPECS_V2[c]
-        raw = df[c].map(norm_str).astype("string")
-        obs = sorted(raw.dropna().unique().tolist())
+    enc_block = encode_mixed_ord_plus_flags_v2(
+        df=df,
+        feature=c,
+        ord_mapping=spec["ord_mapping"],
+        na_tokens=spec.get("na_tokens"),
+        idk_tokens=spec.get("idk_tokens"),
+        extra_flag_tokens=spec.get("extra_flag_tokens"),
+        collapse_map=spec.get("collapse_map"),
+        drop_all_zero_flags=True,
+    )
 
-        enc_block = encode_mixed_ord_plus_flags_v2(
-            df=df,
-            feature=c,
-            ord_mapping=spec["ord_mapping"],
-            na_tokens=spec.get("na_tokens"),
-            idk_tokens=spec.get("idk_tokens"),
-            extra_flag_tokens=spec.get("extra_flag_tokens"),
-            collapse_map=spec.get("collapse_map"),
-            drop_all_zero_flags=True,
-        )
+    # mixed v2 detail prints removed
 
-        # mixed v2 detail prints removed
+    mixed_v2_out = mixed_v2_out.join(enc_block)
 
-        mixed_v2_out = mixed_v2_out.join(enc_block)
+cols_before = out.shape[1]
+out = out.join(mixed_v2_out)
 
-    cols_before = out.shape[1]
-    out = out.join(mixed_v2_out)
+# after mixed v2 prints removed
 
-    # after mixed v2 prints removed
+# ----------------------------------------------------------
+# DROP LOW-INFORMATION FLAG COLUMNS
+# ----------------------------------------------------------
+drop_cols = [
+    "ever_observed_mhd_bad_response__no_response",
+]
 
-    # ----------------------------------------------------------
-    # DROP LOW-INFORMATION FLAG COLUMNS
-    # ----------------------------------------------------------
-    drop_cols = [
-        "ever_observed_mhd_bad_response__no_response",
-    ]
+drop_present = [c for c in drop_cols if c in out.columns]
+if drop_present:
+    out = out.drop(columns=drop_present)
+# ==========================================================
+# DROP redundant previous-employment __na flags (explicit list)
+# KEEP prev_boss as the single applicability indicator
+# ==========================================================
 
-    drop_present = [c for c in drop_cols if c in out.columns]
-    if drop_present:
-        out = out.drop(columns=drop_present)
-    # ==========================================================
-    # DROP redundant previous-employment __na flags (explicit list)
-    # KEEP prev_boss as the single applicability indicator
-    # ==========================================================
+# Explicit list of structurally identical NA flags tied to prev_boss
+prev_employment_na_cols = [
+    "prev_observed_bad_conseq_mh__na",
+    "prev_resources__na",
+    "prev_mh_options_known__na",
+    "prev_anonymity_protected__na",
+    "prev_boss_mh_discuss__na",
+    "prev_benefits__na",
+    "mh_comfort_prev_supervisor__na",
+    "mh_comfort_prev_coworkers__na",
+    "mh_ph_prev_boss_serious__na",
+    "bad_conseq_mh_prev_boss__na",
+    "bad_conseq_ph_prev_boss__na",
+]
 
-    # Explicit list of structurally identical NA flags tied to prev_boss
-    prev_employment_na_cols = [
-        "prev_observed_bad_conseq_mh__na",
-        "prev_resources__na",
-        "prev_mh_options_known__na",
-        "prev_anonymity_protected__na",
-        "prev_boss_mh_discuss__na",
-        "prev_benefits__na",
-        "mh_comfort_prev_supervisor__na",
-        "mh_comfort_prev_coworkers__na",
-        "mh_ph_prev_boss_serious__na",
-        "bad_conseq_mh_prev_boss__na",
-        "bad_conseq_ph_prev_boss__na",
-    ]
+# Drop only those that actually exist (safe against refactors)
+drop_cols = [c for c in prev_employment_na_cols if c in out.columns]
+out = out.drop(columns=drop_cols)
 
-    # Drop only those that actually exist (safe against refactors)
-    drop_cols = [c for c in prev_employment_na_cols if c in out.columns]
-    out = out.drop(columns=drop_cols)
+# ==========================================================
+# NORMALIZE BINARY FEATURES TO 0/1 INTEGERS
+# (eliminate True/False everywhere)
+# ==========================================================
+# identify boolean columns
+bool_cols = out.select_dtypes(include=["bool"]).columns.tolist()
 
-    # ==========================================================
-    # NORMALIZE BINARY FEATURES TO 0/1 INTEGERS
-    # (eliminate True/False everywhere)
-    # ==========================================================
-    # identify boolean columns
-    bool_cols = out.select_dtypes(include=["bool"]).columns.tolist()
-
-    if bool_cols:
-        out[bool_cols] = out[bool_cols].astype(int)
+if bool_cols:
+    out[bool_cols] = out[bool_cols].astype(int)
 
 
 
-    # DO NOT DELETE BELOW
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUT_PATH, index=False)
+# DO NOT DELETE BELOW
+OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+out.to_csv(OUT_PATH, index=False)
 
 
 
-main()
 
 #% 04 Compute Gower
-from pathlib import Path
-import hashlib
-import json
-import numpy as np
-import pandas as pd
 
 
 IN_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
@@ -1510,17 +1455,10 @@ def compute_gower_numeric_with_missing(
     This is the correct Gower-style handling of missingness: do NOT impute, instead
     compute distances using available comparable dimensions.
     """
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2D; got shape {X.shape}")
-
     n, p = X.shape
-    if feature_ranges.shape != (p,):
-        raise ValueError(f"feature_ranges must have shape ({p},); got {feature_ranges.shape}")
 
     # Only non-constant, well-defined ranges contribute
     valid_feat = np.isfinite(feature_ranges) & (feature_ranges > 0)
-    if valid_feat.sum() == 0:
-        raise ValueError("No valid features (all ranges are 0 or NaN). Gower undefined.")
 
     Xv = X[:, valid_feat].astype(np.float64, copy=False)
     rv = feature_ranges[valid_feat].astype(np.float64, copy=False)
@@ -1571,20 +1509,17 @@ def compute_gower_numeric_with_missing(
     return D
 
 
-def main(force: bool = False, block_size: int = 256) -> None:
-    if not IN_PATH.exists():
-        raise FileNotFoundError(f"Missing input encoded drivers: {IN_PATH}")
+force = False
+block_size = 256
+in_hash = sha256_file(IN_PATH)
 
-    in_hash = sha256_file(IN_PATH)
+skip_gower_compute = False
+if OUT_NPY.exists() and OUT_META.exists() and not force:
+    meta = json.loads(OUT_META.read_text(encoding="utf-8"))
+    if meta.get("input_sha256") == in_hash:
+        skip_gower_compute = True
 
-    if OUT_NPY.exists() and OUT_META.exists() and not force:
-        try:
-            meta = json.loads(OUT_META.read_text(encoding="utf-8"))
-            if meta.get("input_sha256") == in_hash:
-                return
-        except Exception:
-            pass
-
+if not skip_gower_compute:
     df = pd.read_csv(IN_PATH)
     if "respondent_id" in df.columns:
         df = df.drop(columns=["respondent_id"])
@@ -1605,10 +1540,7 @@ def main(force: bool = False, block_size: int = 256) -> None:
     D64 = compute_gower_numeric_with_missing(X=X, feature_ranges=ranges, block_size=block_size)
 
     # Diagnostics
-    if np.isnan(D64).any():
-        n_nan = int(np.isnan(D64).sum())
-        raise ValueError(f"Distance matrix contains NaNs after missing-aware Gower: {n_nan} NaNs")
-
+    n_nan = int(np.isnan(D64).sum())
     max_asym = float(np.max(np.abs(D64 - D64.T)))
     diag_max = float(np.max(np.abs(np.diag(D64))))
     dmin = float(np.min(D64))
@@ -1648,90 +1580,8 @@ def main(force: bool = False, block_size: int = 256) -> None:
 
 
 
-main(force=False, block_size=256)
 
 #% 05 PAM
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.metrics import silhouette_score, silhouette_samples
-
-try:
-    from sklearn_extra.cluster import KMedoids  # type: ignore
-    _HAS_SKLEARN_EXTRA = True
-except Exception:
-    _HAS_SKLEARN_EXTRA = False
-
-    class KMedoids:  # minimal fallback for precomputed distances
-        def __init__(self, n_clusters, metric="precomputed", method="pam", init="k-medoids++", random_state=None, max_iter=100):
-            if metric != "precomputed":
-                raise ValueError("Fallback KMedoids only supports metric='precomputed'")
-            if method != "pam":
-                raise ValueError("Fallback KMedoids only supports method='pam'")
-            self.n_clusters = n_clusters
-            self.metric = metric
-            self.method = method
-            self.init = init
-            self.random_state = random_state
-            self.max_iter = max_iter
-            self.medoid_indices_ = None
-
-        def _init_kmedoids_pp(self, D, k, rng):
-            n = D.shape[0]
-            medoids = [rng.randint(0, n)]
-            for _ in range(1, k):
-                dist_to_nearest = np.min(D[:, medoids], axis=1)
-                probs = dist_to_nearest ** 2
-                total = probs.sum()
-                if total == 0:
-                    cand = rng.randint(0, n)
-                else:
-                    probs = probs / total
-                    cand = rng.choice(np.arange(n), p=probs)
-                medoids.append(int(cand))
-            return np.array(medoids, dtype=int)
-
-        def _update_medoids(self, D, labels, k):
-            medoids = []
-            for c in range(k):
-                idx = np.flatnonzero(labels == c)
-                if idx.size == 0:
-                    medoids.append(0)
-                    continue
-                sub = D[np.ix_(idx, idx)]
-                medoid_local = int(np.argmin(sub.sum(axis=1)))
-                medoids.append(int(idx[medoid_local]))
-            return np.array(medoids, dtype=int)
-
-        def fit(self, D):
-            D = np.asarray(D)
-            n = D.shape[0]
-            rng = np.random.RandomState(self.random_state)
-            if self.init == "k-medoids++":
-                medoids = self._init_kmedoids_pp(D, self.n_clusters, rng)
-            else:
-                medoids = rng.choice(np.arange(n), size=self.n_clusters, replace=False)
-
-            labels = np.argmin(D[:, medoids], axis=1)
-            for _ in range(self.max_iter):
-                new_medoids = self._update_medoids(D, labels, self.n_clusters)
-                new_labels = np.argmin(D[:, new_medoids], axis=1)
-                if np.array_equal(new_medoids, medoids):
-                    medoids = new_medoids
-                    labels = new_labels
-                    break
-                medoids = new_medoids
-                labels = new_labels
-
-            self.medoid_indices_ = medoids
-            self.labels_ = labels
-            return self
-
-        def fit_predict(self, D):
-            self.fit(D)
-            return self.labels_
-
 
 # ==========================================================
 # PAM (K-MEDOIDS) ON PRECOMPUTED GOWER DISTANCES
@@ -1747,14 +1597,6 @@ RANDOM_STATE = 42
 
 
 def validate_distance_matrix(D: np.ndarray) -> None:
-    if D.ndim != 2 or D.shape[0] != D.shape[1]:
-        raise ValueError(f"Expected square n×n distance matrix, got shape {D.shape}")
-    if not np.allclose(np.diag(D), 0.0, atol=1e-6):
-        raise ValueError("Distance matrix diagonal is not ~0.")
-    if not np.allclose(D, D.T, atol=1e-6):
-        raise ValueError("Distance matrix is not symmetric.")
-    if np.min(D) < -1e-6:
-        raise ValueError("Distance matrix has negative entries.")
     # Gower is typically in [0, 1], but do not hard-fail if scaling differs slightly.
     if np.max(D) > 1.0 + 1e-6:
         print(f"WARNING: max(D)={np.max(D):.6f} > 1.0. If you expected Gower, verify scaling.")
@@ -1825,73 +1667,58 @@ def _plot_cluster_sizes_by_k(df: pd.DataFrame, out_path: Path) -> None:
     plt.close(fig)
 
 
-# DONT delete below
-def main() -> None:
-    if not GOWER_PATH.exists():
-        raise FileNotFoundError(f"Missing Gower matrix: {GOWER_PATH}")
+D = np.load(GOWER_PATH)
+validate_distance_matrix(D)
 
-    D = np.load(GOWER_PATH)
-    validate_distance_matrix(D)
+n = D.shape[0]
+print(
+    f"Gower matrix shape={D.shape}; stats min={np.min(D):.6f}, max={np.max(D):.6f}, mean={np.mean(D):.6f}"
+)
 
-    n = D.shape[0]
-    print(
-        f"Gower matrix shape={D.shape}; stats min={np.min(D):.6f}, max={np.max(D):.6f}, mean={np.mean(D):.6f}"
-    )
+rows = []
+for k in K_LIST:
+    res = run_pam(D, k)
 
-    rows = []
-    for k in K_LIST:
-        res = run_pam(D, k)
+    # Save labels per k
+    np.save(OUT_DIR / f"pam_labels_k{k}.npy", res["labels"])
 
-        # Save labels per k
-        np.save(OUT_DIR / f"pam_labels_k{k}.npy", res["labels"])
+    rows.append({kk: vv for kk, vv in res.items() if kk not in ("labels",)})
 
-        rows.append({kk: vv for kk, vv in res.items() if kk not in ("labels",)})
+# Summary table (in-memory only; no CSV output)
+df = pd.DataFrame(rows).sort_values("k")
+df_table = df[["k", "silhouette_avg", "silhouette_q25", "silhouette_q50", "silhouette_q75", "cluster_sizes"]].copy()
+df_table = df_table.rename(columns={
+    "silhouette_avg": "sil_avg",
+    "silhouette_q25": "sil_q25",
+    "silhouette_q50": "sil_q50",
+    "silhouette_q75": "sil_q75",
+})
+df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]] = df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]].round(4)
 
-    # Summary table (in-memory only; no CSV output)
-    df = pd.DataFrame(rows).sort_values("k")
-    df_table = df[["k", "silhouette_avg", "silhouette_q25", "silhouette_q50", "silhouette_q75", "cluster_sizes"]].copy()
-    df_table = df_table.rename(columns={
-        "silhouette_avg": "sil_avg",
-        "silhouette_q25": "sil_q25",
-        "silhouette_q50": "sil_q50",
-        "silhouette_q75": "sil_q75",
-    })
-    df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]] = df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]].round(4)
-    try:
-        from IPython.display import display, HTML
-        display(HTML(df_table.to_html(index=False)))
-    except Exception:
-        pass
+#%% 05A PAM Summary Table
+display(HTML(df_table.to_html(index=False)))
 
-    # ----------------------------
-    # V2 visuals
-    # ----------------------------
-    sil_plot_path = OUT_DIR / "silhouette_vs_k.png"
-    _plot_silhouette_vs_k(df, sil_plot_path)
-    try:
-        from IPython.display import Image, display
-        display(Image(filename=str(sil_plot_path)))
-    except Exception:
-        pass
+# ----------------------------
+# V2 visuals
+# ----------------------------
+sil_plot_path = OUT_DIR / "silhouette_vs_k.png"
+_plot_silhouette_vs_k(df, sil_plot_path)
 
-    size_plot_path = OUT_DIR / "cluster_sizes_by_k.png"
-    _plot_cluster_sizes_by_k(df, size_plot_path)
-    try:
-        from IPython.display import Image, display
-        display(Image(filename=str(size_plot_path)))
-    except Exception:
-        pass
+#%% 05B Silhouette Plot
+display(Image(filename=str(sil_plot_path)))
+
+size_plot_path = OUT_DIR / "cluster_sizes_by_k.png"
+_plot_cluster_sizes_by_k(df, size_plot_path)
+
+#%% 05C Cluster Size Plot
+display(Image(filename=str(size_plot_path)))
 
 
 
-main()
 
 #% 07 PCoA Visual
 # pam_pcoa_k6.py
 
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
 
 
 PAM_DIR = PROJECT_ROOT / "data" / "out" / "pam"
@@ -1905,11 +1732,7 @@ LABELS_PATH = PAM_DIR / f"pam_labels_k{K}.npy"
 
 
 def load_gower() -> np.ndarray:
-    if not GOWER_PATH.exists():
-        raise FileNotFoundError(f"Missing Gower distance matrix: {GOWER_PATH}")
     D = np.load(GOWER_PATH)
-    if D.ndim != 2 or D.shape[0] != D.shape[1]:
-        raise ValueError(f"Expected square distance matrix, got shape {D.shape}")
     # force symmetry (numerical safety)
     D = 0.5 * (D + D.T)
     np.fill_diagonal(D, 0.0)
@@ -1917,11 +1740,7 @@ def load_gower() -> np.ndarray:
 
 
 def load_labels() -> np.ndarray:
-    if not LABELS_PATH.exists():
-        raise FileNotFoundError(f"Missing labels file: {LABELS_PATH}")
     lab = np.load(LABELS_PATH).astype(int)
-    if lab.ndim != 1:
-        raise ValueError(f"Expected 1D labels, got shape {lab.shape}")
     return lab
 
 
@@ -1960,9 +1779,6 @@ def pcoa(D: np.ndarray, n_components: int = 3) -> tuple[np.ndarray, np.ndarray]:
     pos_mask = evals > 1e-12
     evals_pos = evals[pos_mask]
     evecs_pos = evecs[:, pos_mask]
-
-    if evals_pos.size == 0:
-        raise ValueError("No positive eigenvalues found; cannot construct PCoA coordinates.")
 
     m = min(n_components, evals_pos.size)
     evals_pos = evals_pos[:m]
@@ -2030,46 +1846,33 @@ def plot_pcoa_3d(coords: np.ndarray, explained: np.ndarray, labels: np.ndarray, 
     plt.close(fig)
 
 
-def main() -> None:
-    D = load_gower()
-    labels = load_labels()
+D = load_gower()
+labels = load_labels()
 
-    if D.shape[0] != labels.shape[0]:
-        raise ValueError(f"Row mismatch: D is {D.shape[0]}x{D.shape[1]} but labels has {labels.shape[0]}")
+# Need at least 2D for the 2D plot; ask for 3, but handle if only 2 available
+coords, explained = pcoa(D, n_components=3)
 
-    # Need at least 2D for the 2D plot; ask for 3, but handle if only 2 available
-    coords, explained = pcoa(D, n_components=3)
+# 2D
+out2d = OUT_DIR / "pcoa_gower_k6_2d.png"
+plot_pcoa_2d(coords[:, :2], explained[:2], labels, out2d)
 
-    # 2D
-    if coords.shape[1] < 2:
-        raise ValueError("PCoA returned <2 components; cannot make 2D plot.")
-    out2d = OUT_DIR / "pcoa_gower_k6_2d.png"
-    plot_pcoa_2d(coords[:, :2], explained[:2], labels, out2d)
-    try:
-        from IPython.display import Image, display
-        display(Image(filename=str(out2d)))
-    except Exception:
-        pass
+#%% 07A PCoA 2D Display
+display(Image(filename=str(out2d)))
 
-    # 3D
-    if coords.shape[1] >= 3:
-        out3d = OUT_DIR / "pcoa_gower_k6_3d.png"
-        plot_pcoa_3d(coords[:, :3], explained[:3], labels, out3d)
-        try:
-            from IPython.display import Image, display
-            display(Image(filename=str(out3d)))
-        except Exception:
-            pass
-    else:
-        print("PCoA returned only 2 positive components; 3D plot skipped.")
+#%% 07B PCoA 3D Display
+# 3D
+if coords.shape[1] >= 3:
+    out3d = OUT_DIR / "pcoa_gower_k6_3d.png"
+    plot_pcoa_3d(coords[:, :3], explained[:3], labels, out3d)
+    display(Image(filename=str(out3d)))
+else:
+    print("PCoA returned only 2 positive components; 3D plot skipped.")
 
     # no extra console summary
-main()
 
 #%% 07B UMAP Visual
 # pam_umap_k6.py
 
-from umap import UMAP
 
 
 UMAP_PAM_DIR = PROJECT_ROOT / "data" / "out" / "pam"
@@ -2081,20 +1884,12 @@ UMAP_LABELS_PATH = UMAP_PAM_DIR / "pam_labels_k6.npy"
 
 
 def load_umap_gower_precomputed() -> np.ndarray:
-    if not UMAP_GOWER_PATH.exists():
-        raise FileNotFoundError(f"Missing Gower distance matrix: {UMAP_GOWER_PATH}")
     D = np.load(UMAP_GOWER_PATH)
-    if D.ndim != 2 or D.shape[0] != D.shape[1]:
-        raise ValueError(f"Expected square distance matrix, got shape {D.shape}")
     return D.astype(float)
 
 
 def load_umap_labels_k6() -> np.ndarray:
-    if not UMAP_LABELS_PATH.exists():
-        raise FileNotFoundError(f"Missing labels file: {UMAP_LABELS_PATH}")
     labels = np.load(UMAP_LABELS_PATH).astype(int)
-    if labels.ndim != 1:
-        raise ValueError(f"Expected 1D labels, got shape {labels.shape}")
     return labels
 
 
@@ -2106,8 +1901,6 @@ def fit_umap_precomputed_gower(
     random_state: int = 42,
     spread: float = 2,
 ) -> np.ndarray:
-    import warnings
-
     reducer = UMAP(
         n_components=n_components,
         metric="precomputed",
@@ -2131,10 +1924,6 @@ def fit_umap_precomputed_gower(
             module=r"umap\.umap_",
         )
         emb = reducer.fit_transform(D)
-    if emb.shape != (D.shape[0], n_components):
-        raise ValueError(
-            f"Unexpected UMAP embedding shape: {emb.shape}, expected {(D.shape[0], n_components)}"
-        )
     return emb
 
 
@@ -2186,9 +1975,6 @@ def run_umap_k6() -> tuple[np.ndarray, np.ndarray]:
     D = load_umap_gower_precomputed()
     labels = load_umap_labels_k6()
 
-    if D.shape[0] != labels.shape[0]:
-        raise ValueError(f"Row mismatch: D is {D.shape[0]}x{D.shape[1]} but labels has {labels.shape[0]}")
-
     emb2d = fit_umap_precomputed_gower(D=D, n_components=2)
     emb3d = fit_umap_precomputed_gower(D=D, n_components=3)
 
@@ -2197,12 +1983,8 @@ def run_umap_k6() -> tuple[np.ndarray, np.ndarray]:
     plot_umap_2d(emb2d, labels, out2d)
     plot_umap_3d(emb3d, labels, out3d)
 
-    try:
-        from IPython.display import Image, display
-        display(Image(filename=str(out2d)))
-        display(Image(filename=str(out3d)))
-    except Exception:
-        pass
+    display(Image(filename=str(out2d)))
+    display(Image(filename=str(out3d)))
 
     return emb2d, emb3d
 
@@ -2212,24 +1994,9 @@ UMAP_EMBEDDING_2D, UMAP_EMBEDDING_3D = run_umap_k6()
 #%% 08 Post-Cluster Validate
 # pam_post_validate.py
 
-from pathlib import Path
-import numpy as np
-import pandas as pd
-from sklearn.metrics import adjusted_rand_score
 
-import matplotlib.pyplot as plt
-from itertools import combinations
 
 # NEW: suppress Matplotlib deprecation spam + support panel plots
-import warnings
-from matplotlib import MatplotlibDeprecationWarning
-
-# Plotly for Sankey diagrams (recommended)
-try:
-    import plotly.graph_objects as go
-    _HAS_PLOTLY = True
-except Exception:
-    _HAS_PLOTLY = False
 
 
 # ==========================================================
@@ -2289,9 +2056,6 @@ def load_encoded_drivers() -> tuple[np.ndarray, list[str]]:
     Expected: numeric encoded matrix (standardized numeric and/or one-hot).
     If respondent_id exists, it is dropped.
     """
-    if not ENCODED_PATH.exists():
-        raise FileNotFoundError(f"Missing encoded drivers file: {ENCODED_PATH}")
-
     df = pd.read_csv(ENCODED_PATH)
     if "respondent_id" in df.columns:
         df = df.drop(columns=["respondent_id"])
@@ -2308,11 +2072,6 @@ def compute_cluster_medoids_from_gower(D: np.ndarray, labels: np.ndarray) -> dic
     Medoid definition: point minimizing the sum of distances to all other points
     within its cluster (classic PAM medoid criterion).
     """
-    if D.ndim != 2 or D.shape[0] != D.shape[1]:
-        raise ValueError(f"Expected square distance matrix, got shape {D.shape}")
-    if labels.ndim != 1 or labels.shape[0] != D.shape[0]:
-        raise ValueError("Label vector length must match distance matrix size.")
-
     medoids: dict[int, int] = {}
     for c in np.unique(labels):
         idx = np.flatnonzero(labels == c)
@@ -2347,11 +2106,7 @@ def split_feature_types(X: np.ndarray, feature_names: list[str]) -> tuple[np.nda
     Returns:
       (binary_mask, ordinal_mask) boolean arrays of length p
     """
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2D, got shape {X.shape}")
     _, p = X.shape
-    if len(feature_names) != p:
-        raise ValueError("feature_names length must match X columns.")
 
     binary_mask = np.zeros(p, dtype=bool)
 
@@ -2383,10 +2138,6 @@ def compute_feature_importance_matrix_ordinal(
       mean pairwise |medoid values| normalized by IQR(feature) on full dataset
     """
     n, p = X.shape
-    if D.shape[0] != n:
-        raise ValueError("Distance matrix size must match X rows.")
-    if ordinal_mask.shape[0] != p:
-        raise ValueError("ordinal_mask length must match #features.")
 
     Xo = X[:, ordinal_mask]
     names_o = [feature_names[i] for i in np.flatnonzero(ordinal_mask)]
@@ -2432,10 +2183,6 @@ def compute_feature_importance_matrix_binary(
     This stays interpretable for sparse one-hot columns and is naturally in [0,1].
     """
     n, p = X.shape
-    if D.shape[0] != n:
-        raise ValueError("Distance matrix size must match X rows.")
-    if binary_mask.shape[0] != p:
-        raise ValueError("binary_mask length must match #features.")
 
     Xb = X[:, binary_mask]
     names_b = [feature_names[i] for i in np.flatnonzero(binary_mask)]
@@ -2474,9 +2221,6 @@ def plot_heatmap(
       - uses a single consistent color scale across all k in this heatmap
       - does not cluster rows/columns
     """
-    if mat.empty:
-        raise ValueError(f"Heatmap matrix is empty: {title}")
-
     mat2 = mat.copy()
     if "k5" in mat2.columns:
         mat2 = mat2.sort_values("k5", ascending=False)
@@ -2543,9 +2287,6 @@ def plot_panel_ordinal_boxplots_by_k(
     UPDATED: Remove per-row y-axis labels and instead add one left-side row title
     per feature (outside the axes) to avoid stacked y-label overlap.
     """
-    if len(features) == 0:
-        raise ValueError("No features provided for ordinal panel plot.")
-
     nrows = len(features)
     ncols = len(ks)
 
@@ -2619,9 +2360,6 @@ def plot_panel_binary_bars_by_k(
     UPDATED: Remove per-row y-axis labels and instead add one left-side row title
     per feature (outside the axes) to avoid stacked y-label overlap.
     """
-    if len(features) == 0:
-        raise ValueError("No features provided for binary panel plot.")
-
     nrows = len(features)
     ncols = len(ks)
 
@@ -2677,11 +2415,7 @@ def plot_panel_binary_bars_by_k(
 
 def load_labels(k: int) -> np.ndarray:
     path = PAM_DIR / f"pam_labels_k{k}.npy"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing labels file: {path}")
     labels = np.load(path)
-    if labels.ndim != 1:
-        raise ValueError(f"Expected 1D labels for k={k}, got shape {labels.shape}")
     return labels.astype(int)
 
 
@@ -2766,9 +2500,6 @@ def make_sankey_adjacent(
     labels_to: np.ndarray,
     out_html: Path,
 ) -> None:
-    if not _HAS_PLOTLY:
-        print("Plotly not available; skipping Sankey diagram:", out_html)
-        return
     ct = contingency_matrix(labels_from, labels_to)
 
     left_nodes = [f"k{k_from}_c{int(i)}" for i in ct.index.tolist()]
@@ -2808,9 +2539,6 @@ def make_sankey_global(
     label_map: dict[int, np.ndarray],
     out_html: Path,
 ) -> None:
-    if not _HAS_PLOTLY:
-        print("Plotly not available; skipping Sankey diagram:", out_html)
-        return
     """
     Global Sankey with layers: k4 -> k5 -> k6 -> k7 (adjacent links only).
     Nodes labeled "k4_c0", etc.
@@ -2858,81 +2586,67 @@ def make_sankey_global(
     fig.write_html(str(out_html))
 
     # Always show an inline interactive version in notebook output
-    try:
-        from IPython.display import display, HTML
-        display(HTML(fig.to_html(include_plotlyjs='cdn')))
-    except Exception:
-        pass
+    display(HTML(fig.to_html(include_plotlyjs='cdn')))
 
 
-def main() -> None:
-    # NEW: silence the Matplotlib “labels -> tick_labels” deprecation spam
-    warnings.filterwarnings("ignore", category=MatplotlibDeprecationWarning)
+# NEW: silence the Matplotlib “labels -> tick_labels” deprecation spam
+warnings.filterwarnings("ignore", category=MatplotlibDeprecationWarning)
 
-    # -------------------------
-    # Load labels
-    # -------------------------
-    label_map = {k: load_labels(k) for k in KS}
-    n = len(next(iter(label_map.values())))
-    for k, lab in label_map.items():
-        if len(lab) != n:
-            raise ValueError(f"Label length mismatch: k={k} has {len(lab)} labels, expected {n}")
+# -------------------------
+# Load labels
+# -------------------------
+label_map = {k: load_labels(k) for k in KS}
+n = len(next(iter(label_map.values())))
 
-    # -------------------------
-    # ARI table (console + optional save)
-    # -------------------------
-    ari_rows = []
-    for i in range(len(KS)):
-        for j in range(i + 1, len(KS)):
-            k1, k2 = KS[i], KS[j]
-            ari = float(adjusted_rand_score(label_map[k1], label_map[k2]))
-            ari_rows.append({"k1": k1, "k2": k2, "ARI": ari})
+# -------------------------
+# ARI table (console + optional save)
+# -------------------------
+ari_rows = []
+for i in range(len(KS)):
+    for j in range(i + 1, len(KS)):
+        k1, k2 = KS[i], KS[j]
+        ari = float(adjusted_rand_score(label_map[k1], label_map[k2]))
+        ari_rows.append({"k1": k1, "k2": k2, "ARI": ari})
 
-    ari_df = pd.DataFrame(ari_rows).sort_values(["k1", "k2"]).reset_index(drop=True)
-    try:
-        from IPython.display import display, HTML
-        display(HTML(ari_df.to_html(index=False)))
-    except Exception:
-        print(ari_df.to_string(index=False))
+ari_df = pd.DataFrame(ari_rows).sort_values(["k1", "k2"]).reset_index(drop=True)
+#%% 08A ARI Table
+display(HTML(ari_df.to_html(index=False)))
 
-    # Optional: keep a single CSV artifact (not many files)
-    # -------------------------
-    # Stability summary metrics (adjacent only)
-    # -------------------------
-    stability_rows = []
-    for k_from, k_to in zip(KS[:-1], KS[1:]):
-        metrics = stability_metrics_for_transition(
-            k_from=k_from,
-            k_to=k_to,
-            labels_from=label_map[k_from],
-            labels_to=label_map[k_to],
-            split_threshold=SPLIT_THRESHOLD,
-            weighted=WEIGHTED,
-        )
-        stability_rows.append(metrics)
+# Optional: keep a single CSV artifact (not many files)
+# -------------------------
+# Stability summary metrics (adjacent only)
+# -------------------------
+stability_rows = []
+for k_from, k_to in zip(KS[:-1], KS[1:]):
+    metrics = stability_metrics_for_transition(
+        k_from=k_from,
+        k_to=k_to,
+        labels_from=label_map[k_from],
+        labels_to=label_map[k_to],
+        split_threshold=SPLIT_THRESHOLD,
+        weighted=WEIGHTED,
+    )
+    stability_rows.append(metrics)
 
-    stability_df = pd.DataFrame(stability_rows)
-    show = stability_df.copy()
-    for c in ["avg_max_row_overlap", "median_max_row_overlap", "median_row_entropy", "effective_num_targets_median"]:
-        show[c] = show[c].round(3)
-    show["pct_clusters_split"] = show["pct_clusters_split"].round(1)
-    try:
-        from IPython.display import display, HTML
-        display(HTML(show.to_html(index=False)))
-    except Exception:
-        print(show.to_string(index=False))
+stability_df = pd.DataFrame(stability_rows)
+show = stability_df.copy()
+for c in ["avg_max_row_overlap", "median_max_row_overlap", "median_row_entropy", "effective_num_targets_median"]:
+    show[c] = show[c].round(3)
+show["pct_clusters_split"] = show["pct_clusters_split"].round(1)
+#%% 08B Stability Table
+display(HTML(show.to_html(index=False)))
 
-    # stability_summary_adjacent.csv output removed by request
-    # Note: robustness_ari.csv output removed by request
+# stability_summary_adjacent.csv output removed by request
+# Note: robustness_ari.csv output removed by request
 
-    # -------------------------
-    # Global Sankey only
-    # -------------------------
-    global_html = OUT_DIR / "sankey_global_k4_k5_k6_k7.html"
-    make_sankey_global(KS, label_map, global_html)
+# -------------------------
+# Global Sankey only
+# -------------------------
+global_html = OUT_DIR / "sankey_global_k4_k5_k6_k7.html"
+#%% 08C Sankey
+make_sankey_global(KS, label_map, global_html)
 
-    # Feature-importance outputs and distribution panels removed as requested.
-main()
+# Feature-importance outputs and distribution panels removed as requested.
 
 #% 09 K6 Inspect
 """
@@ -2965,12 +2679,6 @@ Expected inputs:
 """
 
 
-from pathlib import Path
-import itertools
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 
 
@@ -3003,7 +2711,7 @@ def _find_feature_column(df: pd.DataFrame) -> str:
     for c in FEATURE_CANDIDATES:
         if c in df.columns:
             return c
-    raise KeyError("friend_family_mhd_comfort column not found")
+    return FEATURE_CANDIDATES[0]
 
 
 def _build_forward_map() -> dict[str, dict[str, float]]:
@@ -3045,7 +2753,7 @@ def _find_any_column(df, candidates):
     for c in candidates:
         if c in df.columns:
             return c
-    raise KeyError
+    return candidates[0]
 
 
 def _print_cluster_label_pct(df, labels, cluster_id, feature_candidates, label_text):
@@ -3127,20 +2835,19 @@ def _build_raw_pairwise_diff_matrix(
 # ============================================================
 
 
-def main():
 
-    df = load_encoded_df()
-    labels = load_labels()
+df = load_encoded_df()
+labels = load_labels()
 
-    feature = _find_feature_column(df)
+feature = _find_feature_column(df)
 
-    values = df[feature].values[labels == CLUSTER_ID]
+values = df[feature].values[labels == CLUSTER_ID]
 
-    code_some = _get_code_for_label(feature, "Somewhat open") or 4
-    code_very = _get_code_for_label(feature, "Very open") or 5
+code_some = _get_code_for_label(feature, "Somewhat open") or 4
+code_very = _get_code_for_label(feature, "Very open") or 5
 
-    pct_some, cnt_some, total = _pct_and_count_over_full(values, code_some)
-    pct_very, cnt_very, _ = _pct_and_count_over_full(values, code_very)
+pct_some, cnt_some, total = _pct_and_count_over_full(values, code_some)
+pct_very, cnt_very, _ = _pct_and_count_over_full(values, code_very)
 
     # prints removed
     # Pairwise medoid-diff heatmaps removed; keep only raw top-30 heatmap.
@@ -3148,14 +2855,10 @@ def main():
 
 
 
-main()
 
 #% 10 PAM Cluster Profiles K6
 # pam_cluster_profiles_k6_console.py
 
-from pathlib import Path
-import numpy as np
-import pandas as pd
 
 # Import ordinal maps directly from encoding.py
 
@@ -3196,8 +2899,6 @@ def load_preprocessed_drivers_raw() -> pd.DataFrame:
     Loads drivers BEFORE encoding but AFTER preprocessing (skip-logic / cleaning).
     Expected file: data/out/survey_drivers.csv
     """
-    if not DRIVERS_RAW_PATH.exists():
-        raise FileNotFoundError(f"Missing raw drivers file: {DRIVERS_RAW_PATH}")
     return pd.read_csv(DRIVERS_RAW_PATH)
 
 
@@ -3217,20 +2918,9 @@ def align_labels_to_raw(df_raw: pd.DataFrame, labels: np.ndarray) -> np.ndarray:
         if "respondent_id" in df_enc.columns and len(df_enc) == len(labels):
             id_to_label = pd.Series(labels, index=df_enc["respondent_id"]).to_dict()
             mapped = df_raw["respondent_id"].map(id_to_label).to_numpy()
-            if np.any(pd.isna(mapped)):
-                missing = int(pd.isna(mapped).sum())
-                raise ValueError(
-                    f"Could not align {missing} rows via respondent_id. "
-                    f"Check that survey_drivers.csv and drivers_encoded.csv contain the same respondent_id set."
-                )
             return mapped.astype(int)
 
     # fallback: positional alignment
-    if len(df_raw) != len(labels):
-        raise ValueError(
-            f"Row count mismatch: raw drivers n={len(df_raw)} vs labels n={len(labels)}. "
-            f"Cannot align without respondent_id."
-        )
     return labels.astype(int)
 
 
@@ -3570,8 +3260,6 @@ def plot_raw_feature_stacked_by_cluster(
       - stacked segments: answer categories (including NA for missing)
       - each bar sums to 1.0 (proportions within cluster)
     """
-    import matplotlib.pyplot as plt
-
     series = df_raw[feature].copy()
 
     # normalize missing display
@@ -3700,8 +3388,6 @@ def plot_raw_benefits_and_resources_stacked_by_cluster(
     Legend uses compact labels of the form:
       B:Y R:N   (B=benefits, R=resources)
     """
-    import matplotlib.pyplot as plt
-
     b = df_raw[benefits_feature].map(_normalize_benefits_value)
     r = df_raw[resources_feature].map(_normalize_resources_value)
 
@@ -3765,9 +3451,6 @@ def plot_raw_feature_panel(
     legend_mode: str = "shared",
     legend_order: Optional[list[str]] = None,
 ) -> None:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-
     n = len(features)
     ncols = max(1, ncols)
     nrows = (n + ncols - 1) // ncols
@@ -3868,12 +3551,8 @@ def plot_raw_feature_panel(
     else:
         plt.tight_layout(rect=[0.04, 0.03, 1, 0.96])
     plt.savefig(out_path, bbox_inches="tight")
-    try:
-        from IPython.display import Image, display
-        # panel display message removed
-        display(Image(filename=str(out_path)))
-    except Exception:
-        pass
+    # panel display message removed
+    display(Image(filename=str(out_path)))
     plt.close()
 
 
@@ -4308,11 +3987,7 @@ def pam_cluster_profiles_main() -> None:
             "percent": round(n / len(labels) * 100, 1),
         })
     size_df = pd.DataFrame(size_rows)
-    try:
-        from IPython.display import display, HTML
-        display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
-    except Exception:
-        print(size_df.to_string(index=False))
+    display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
 
     # ------------------------
     # NEW: Raw (pre-encoding) plots by cluster
@@ -4332,12 +4007,8 @@ def pam_cluster_profiles_main() -> None:
         max_rows=30,
     )
 
-    try:
-        from IPython.display import Image, display
-        # heatmap display message removed
-        display(Image(filename=str(out_top30)))
-    except Exception:
-        pass
+    # heatmap display message removed
+    display(Image(filename=str(out_top30)))
 
     # Raw feature answers: cluster vs rest (Top 15)
     exclude_subs = {
@@ -4351,11 +4022,7 @@ def pam_cluster_profiles_main() -> None:
     )
     for c in sorted(raw_tables.keys()):
         if c == 0:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 0 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 0 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "prev_boss=Yes",
@@ -4371,17 +4038,9 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 0 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 0 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         elif c == 1:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 1 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 1 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "resources=No",
@@ -4404,17 +4063,9 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 1 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 1 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         elif c == 2:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 2 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 2 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "resources=No",
@@ -4439,17 +4090,9 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 2 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 2 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         elif c == 3:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 3 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 3 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "boss_mh_discuss=No",
@@ -4475,17 +4118,9 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 3 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 3 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         elif c == 4:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 4 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 4 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "prev_anonymity_protected=I don't know",
@@ -4503,17 +4138,9 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 4 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 4 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         elif c == 5:
-            try:
-                from IPython.display import display, HTML
-                display(HTML("<b>CLUSTER 5 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-            except Exception:
-                print(raw_tables[c].to_string(index=False))
+            display(HTML("<b>CLUSTER 5 vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
 
             selected = [
                 "mh_options_known=Yes",
@@ -4534,11 +4161,7 @@ def pam_cluster_profiles_main() -> None:
                 selected_features=selected,
             )
             if not forced_df.empty:
-                try:
-                    from IPython.display import display, HTML
-                    display(HTML("<b>CLUSTER 5 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-                except Exception:
-                    print(forced_df.to_string(index=False))
+                display(HTML("<b>CLUSTER 5 vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
         else:
             print("\n" + "=" * 100)
             print(f"RAW (pre-encoding) — CLUSTER {c} vs REST (Top 15 by deviation)")
@@ -4550,11 +4173,7 @@ def pam_cluster_profiles_main() -> None:
     pair_tables = build_raw_pairwise_tables(df_raw, labels_raw, pairs=pairs, top_n=15)
     for c1, c2 in pairs:
         title = f"CLUSTER {c1} vs CLUSTER {c2} (Top deviations)"
-        try:
-            from IPython.display import display, HTML
-            display(HTML("<b>" + title + "</b>" + pair_tables[(c1, c2)].to_html(index=False)))
-        except Exception:
-            print(pair_tables[(c1, c2)].to_string(index=False))
+        display(HTML("<b>" + title + "</b>" + pair_tables[(c1, c2)].to_html(index=False)))
 
 
 pam_cluster_profiles_main()
@@ -4591,13 +4210,7 @@ Override paths if needed:
 """
 
 
-import argparse
-import re
-from pathlib import Path
-from typing import Iterable, List, Optional
 
-import numpy as np
-import pandas as pd
 
 
 # -----------------------------
@@ -4899,14 +4512,8 @@ def align_labels_to_overlays(df_over: pd.DataFrame, labels: np.ndarray, encoded_
         if "respondent_id" in df_enc.columns and len(df_enc) == len(labels):
             id_to_label = pd.Series(labels, index=df_enc["respondent_id"]).to_dict()
             mapped = df_over["respondent_id"].map(id_to_label).to_numpy()
-            if np.any(pd.isna(mapped)):
-                missing = int(pd.isna(mapped).sum())
-                missing_ids = df_over.loc[pd.isna(mapped), "respondent_id"].head(10).tolist()
-                raise ValueError(f"Could not align {missing} overlay rows via respondent_id. Examples: {missing_ids}")
             return mapped.astype(int)
 
-    if len(df_over) != len(labels):
-        raise ValueError(f"Row mismatch overlays={len(df_over)} vs labels={len(labels)}; cannot align without respondent_id mapping.")
     return labels.astype(int)
 
 
@@ -4937,8 +4544,6 @@ def plot_categorical_stacked_by_cluster(
     max_categories: Optional[int] = None,
     ax: Optional["plt.Axes"] = None,
 ) -> None:
-    import matplotlib.pyplot as plt
-
     s = series.copy()
     s = s.astype(object)
     s[pd.isna(s)] = "NA"
@@ -5043,20 +4648,6 @@ def cluster_answer_pct_table(
         rows.append(row)
     return pd.DataFrame(rows)
 
-    ax.legend(
-        title=legend_title,
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        fontsize=8,
-        ncol=1,
-    )
-
-    if out_path is not None:
-        plt.tight_layout()
-        plt.savefig(out_path, bbox_inches="tight")
-        plt.close()
-
 
 # -----------------------------
 # Main: apply recodes + plot
@@ -5083,283 +4674,189 @@ def apply_recodes(df_over: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def parse_args() -> argparse.Namespace:
-    here = Path(__file__).resolve()
-    project_root_guess = here.parents[2] if len(here.parents) >= 3 else Path.cwd()
+#%% 11A Overlay Config
+OVERLAYS_PATH = PROJECT_ROOT / "data" / "out" / "overlays_clean.csv"
+OVERLAY_LABELS_PATH = PROJECT_ROOT / "data" / "out" / "pam" / "pam_labels_k6.npy"
+OVERLAY_ENCODED_PATH = PROJECT_ROOT / "data" / "out" / "drivers_encoded.csv"
+OVERLAY_OUTDIR = PROJECT_ROOT / "data" / "out" / "pam_post" / "overlay_distributions_k6_cleaned"
+OVERLAY_K = 6
 
-    default_overlays = project_root_guess / "data" / "out" / "overlays_clean.csv"
-    default_labels = project_root_guess / "data" / "out" / "pam" / "pam_labels_k6.npy"
-    default_encoded = project_root_guess / "data" / "out" / "drivers_encoded.csv"
-    default_outdir = project_root_guess / "data" / "out" / "pam_post" / "overlay_distributions_k6_cleaned"
+OVERLAY_OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--overlays", type=Path, default=default_overlays, help="Path to overlays_clean.csv")
-    ap.add_argument("--labels", type=Path, default=default_labels, help="Path to pam_labels_k6.npy")
-    ap.add_argument("--encoded-drivers", type=Path, default=default_encoded, help="Path to drivers_encoded.csv (for respondent_id alignment)")
-    ap.add_argument("--outdir", type=Path, default=default_outdir, help="Output directory for PNG plots")
-    ap.add_argument("--k", type=int, default=6, help="k used for clustering (used in titles/filenames)")
-    return ap.parse_args()
+df_over = pd.read_csv(OVERLAYS_PATH)
+labels = np.load(OVERLAY_LABELS_PATH).astype(int)
+labels_aligned = align_labels_to_overlays(df_over, labels, OVERLAY_ENCODED_PATH)
+df = apply_recodes(df_over)
 
+features = [c for c in df.columns if c != "respondent_id"]
+exclude = {
+    "mhd_believe_condition",
+    "mhd_diagnosed_condition",
+    "treat_mhd_bad_work",
+    "US_state",
+    "US_work",
+}
+features = [c for c in features if c not in exclude]
 
-def main() -> None:
-    args = parse_args()
-    args.outdir.mkdir(parents=True, exist_ok=True)
+#%% 11B Overlay Panel Age/Gender/Country/Position
+panel_feats = ["age", "gender", "country_work", "work_position"]
+if all(f in df.columns for f in panel_feats):
+    fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+    axes = axes.ravel()
 
-    if not args.overlays.exists():
-        raise FileNotFoundError(f"Missing overlays file: {args.overlays}")
-    if not args.labels.exists():
-        raise FileNotFoundError(f"Missing labels file: {args.labels}")
+    plot_categorical_stacked_by_cluster(
+        series=df["age"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): age",
+        out_path=None,
+        category_order=AGE_LABELS + ["NA"],
+        legend_title="Answer",
+        ax=axes[0],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["gender"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): gender",
+        out_path=None,
+        category_order=GENDER_TARGET_ORDER,
+        legend_title="Answer",
+        ax=axes[1],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["country_work"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): country_work",
+        out_path=None,
+        legend_title="Answer",
+        max_categories=15,
+        min_prop_to_keep=0.01,
+        ax=axes[2],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["work_position"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): work_position",
+        out_path=None,
+        category_order=WORK_ORDER,
+        legend_title="Answer",
+        ax=axes[3],
+    )
 
-    df_over = pd.read_csv(args.overlays)
-    if "respondent_id" not in df_over.columns:
-        raise ValueError("overlays CSV must have a respondent_id column for safe alignment.")
+    panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_age_gender_country_work_position.png"
+    plt.tight_layout()
+    plt.savefig(panel_path, bbox_inches="tight")
+    display(Image(filename=str(panel_path)))
+    plt.close()
+else:
+    missing = [f for f in panel_feats if f not in df.columns]
+    print(f"Skipping overlay panel (missing columns: {missing})")
 
-    labels = np.load(args.labels).astype(int)
-    labels_aligned = align_labels_to_overlays(df_over, labels, args.encoded_drivers)
+#%% 11C Overlay Panel MHD Past/Current/Treatment
+panel_feats = ["mhd_past", "current_mhd", "pro_treatment", "no_treat_mhd_bad_work"]
+if all(f in df.columns for f in panel_feats):
+    fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+    axes = axes.ravel()
 
-    df = apply_recodes(df_over)
-    features = [c for c in df.columns if c != "respondent_id"]
-    exclude = {
-        "mhd_believe_condition",
-        "mhd_diagnosed_condition",
-        "treat_mhd_bad_work",
-        "US_state",
-        "US_work",
-    }
-    features = [c for c in features if c not in exclude]
+    plot_categorical_stacked_by_cluster(
+        series=df["mhd_past"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): mhd_past",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[0],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["current_mhd"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): current_mhd",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[1],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["pro_treatment"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): pro_treatment",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[2],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["no_treat_mhd_bad_work"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): no_treat_mhd_bad_work",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[3],
+    )
 
-    # overlay plots skip message removed
+    panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_mhd_past_current_mhd_pro_treatment_no_treat_mhd_bad_work.png"
+    plt.tight_layout()
+    plt.savefig(panel_path, bbox_inches="tight")
+    display(Image(filename=str(panel_path)))
+    plt.close()
+else:
+    missing = [f for f in panel_feats if f not in df.columns]
+    print(f"Skipping overlay panel (missing columns: {missing})")
 
-    # Combined 2x2 panel for key overlay features (age, gender, country_work, work_position)
-    panel_feats = ["age", "gender", "country_work", "work_position"]
-    if all(f in df.columns for f in panel_feats):
-        import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
-        axes = axes.ravel()
+#%% 11D Overlay Panel Career/Perception/Diagnosis
+panel_feats = ["mhd_hurt_career", "coworkers_view_neg_mhd", "med_pro_condition", "mhd_by_med_pro"]
+if all(f in df.columns for f in panel_feats):
+    fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
+    axes = axes.ravel()
 
-        # age
-        plot_categorical_stacked_by_cluster(
-            series=df["age"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): age",
-            out_path=None,
-            category_order=AGE_LABELS + ["NA"],
-            legend_title="Answer",
-            ax=axes[0],
-        )
+    plot_categorical_stacked_by_cluster(
+        series=df["mhd_hurt_career"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): mhd_hurt_career",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[0],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["coworkers_view_neg_mhd"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): coworkers_view_neg_mhd",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[1],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["med_pro_condition"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): med_pro_condition",
+        out_path=None,
+        category_order=MED_GROUPS_ORDER,
+        legend_title="Answer",
+        ax=axes[2],
+    )
+    plot_categorical_stacked_by_cluster(
+        series=df["mhd_by_med_pro"],
+        labels=labels_aligned,
+        title=f"Overlay distribution by cluster (k={OVERLAY_K}): mhd_by_med_pro",
+        out_path=None,
+        legend_title="Answer",
+        ax=axes[3],
+    )
 
-        # gender
-        plot_categorical_stacked_by_cluster(
-            series=df["gender"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): gender",
-            out_path=None,
-            category_order=GENDER_TARGET_ORDER,
-            legend_title="Answer",
-            ax=axes[1],
-        )
+    panel_path = OVERLAY_OUTDIR / f"overlay_k{OVERLAY_K}_panel_mhd_hurt_career_coworkers_view_neg_mhd_med_pro_condition_mhd_by_med_pro.png"
+    plt.tight_layout()
+    plt.savefig(panel_path, bbox_inches="tight")
+    display(Image(filename=str(panel_path)))
+    plt.close()
+else:
+    missing = [f for f in panel_feats if f not in df.columns]
+    print(f"Skipping overlay panel (missing columns: {missing})")
 
-        # country_work (use top categories + Other)
-        plot_categorical_stacked_by_cluster(
-            series=df["country_work"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): country_work",
-            out_path=None,
-            legend_title="Answer",
-            max_categories=15,
-            min_prop_to_keep=0.01,
-            ax=axes[2],
-        )
+#%% 11E Overlay Tables
+dom_feats = ["mhd_by_med_pro", "pro_treatment", "mhd_past", "current_mhd", "med_pro_condition"]
+if all(f in df.columns for f in dom_feats):
+    dom_df = dominant_answer_table(df, labels_aligned, dom_feats)
+    display(HTML("<b>Dominant answers (overlays)</b>" + dom_df.to_html(index=False)))
 
-        # work_position
-        plot_categorical_stacked_by_cluster(
-            series=df["work_position"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): work_position",
-            out_path=None,
-            category_order=WORK_ORDER,
-            legend_title="Answer",
-            ax=axes[3],
-        )
-
-        panel_path = args.outdir / f"overlay_k{args.k}_panel_age_gender_country_work_position.png"
-        plt.tight_layout()
-        plt.savefig(panel_path, bbox_inches="tight")
-        try:
-            from IPython.display import Image, display
-            # overlay panel display message removed
-            display(Image(filename=str(panel_path)))
-        except Exception:
-            pass
-        plt.close()
-    else:
-        missing = [f for f in panel_feats if f not in df.columns]
-        print(f"Skipping overlay panel (missing columns: {missing})")
-
-    # Combined 2x2 panel for key overlay features (mhd_past, current_mhd, pro_treatment, no_treat_mhd_bad_work)
-    panel_feats = ["mhd_past", "current_mhd", "pro_treatment", "no_treat_mhd_bad_work"]
-    if all(f in df.columns for f in panel_feats):
-        import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
-        axes = axes.ravel()
-
-        # mhd_past
-        plot_categorical_stacked_by_cluster(
-            series=df["mhd_past"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): mhd_past",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[0],
-        )
-
-        # current_mhd
-        plot_categorical_stacked_by_cluster(
-            series=df["current_mhd"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): current_mhd",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[1],
-        )
-
-        # pro_treatment
-        plot_categorical_stacked_by_cluster(
-            series=df["pro_treatment"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): pro_treatment",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[2],
-        )
-
-        # no_treat_mhd_bad_work
-        plot_categorical_stacked_by_cluster(
-            series=df["no_treat_mhd_bad_work"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): no_treat_mhd_bad_work",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[3],
-        )
-
-        panel_path = args.outdir / f"overlay_k{args.k}_panel_mhd_past_current_mhd_pro_treatment_no_treat_mhd_bad_work.png"
-        plt.tight_layout()
-        plt.savefig(panel_path, bbox_inches="tight")
-        try:
-            from IPython.display import Image, display
-            # overlay panel display message removed
-            display(Image(filename=str(panel_path)))
-        except Exception:
-            pass
-        plt.close()
-    else:
-        missing = [f for f in panel_feats if f not in df.columns]
-        print(f"Skipping overlay panel (missing columns: {missing})")
-
-    # Combined 2x2 panel for key overlay features (mhd_hurt_career, coworkers_view_neg_mhd, med_pro_condition, mhd_by_med_pro)
-    panel_feats = ["mhd_hurt_career", "coworkers_view_neg_mhd", "med_pro_condition", "mhd_by_med_pro"]
-    if all(f in df.columns for f in panel_feats):
-        import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
-        axes = axes.ravel()
-
-        # mhd_hurt_career
-        plot_categorical_stacked_by_cluster(
-            series=df["mhd_hurt_career"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): mhd_hurt_career",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[0],
-        )
-
-        # coworkers_view_neg_mhd
-        plot_categorical_stacked_by_cluster(
-            series=df["coworkers_view_neg_mhd"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): coworkers_view_neg_mhd",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[1],
-        )
-
-        # med_pro_condition (uses recoded categories)
-        plot_categorical_stacked_by_cluster(
-            series=df["med_pro_condition"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): med_pro_condition",
-            out_path=None,
-            category_order=MED_GROUPS_ORDER,
-            legend_title="Answer",
-            ax=axes[2],
-        )
-
-        # mhd_by_med_pro
-        plot_categorical_stacked_by_cluster(
-            series=df["mhd_by_med_pro"],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={args.k}): mhd_by_med_pro",
-            out_path=None,
-            legend_title="Answer",
-            ax=axes[3],
-        )
-
-        panel_path = args.outdir / f"overlay_k{args.k}_panel_mhd_hurt_career_coworkers_view_neg_mhd_med_pro_condition_mhd_by_med_pro.png"
-        plt.tight_layout()
-        plt.savefig(panel_path, bbox_inches="tight")
-        try:
-            from IPython.display import Image, display
-            # overlay panel display message removed
-            display(Image(filename=str(panel_path)))
-        except Exception:
-            pass
-        plt.close()
-    else:
-        missing = [f for f in panel_feats if f not in df.columns]
-        print(f"Skipping overlay panel (missing columns: {missing})")
-
-    # Dominant answer table for key overlay features (with percentages)
-    dom_feats = ["mhd_by_med_pro", "pro_treatment", "mhd_past", "current_mhd", "med_pro_condition"]
-    if all(f in df.columns for f in dom_feats):
-        dom_df = dominant_answer_table(df, labels_aligned, dom_feats)
-        try:
-            from IPython.display import display, HTML
-            display(HTML("<b>Dominant answers (overlays)</b>" + dom_df.to_html(index=False)))
-        except Exception:
-            print(dom_df.to_string(index=False))
-
-    # Cluster × Answer percentage tables for selected overlay features
-    pct_feats = ["no_treat_mhd_bad_work", "mhd_hurt_career", "coworkers_view_neg_mhd"]
-    for feat in pct_feats:
-        if feat not in df.columns:
-            continue
-        pct_df = cluster_answer_pct_table(df[feat], labels_aligned)
-        try:
-            from IPython.display import display, HTML
-            display(HTML(f"<b>{feat}</b>" + pct_df.to_html(index=False)))
-        except Exception:
-            print(pct_df.to_string(index=False))
-
-    # done message removed
-
-
-# Override parse_args to avoid notebook argv issues
-
-def parse_args() -> argparse.Namespace:
-    project_root_guess = PROJECT_ROOT
-
-    default_overlays = project_root_guess / "data" / "out" / "overlays_clean.csv"
-    default_labels = project_root_guess / "data" / "out" / "pam" / "pam_labels_k6.npy"
-    default_encoded = project_root_guess / "data" / "out" / "drivers_encoded.csv"
-    default_outdir = project_root_guess / "data" / "out" / "pam_post" / "overlay_distributions_k6_cleaned"
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--overlays", type=Path, default=default_overlays, help="Path to overlays_clean.csv")
-    ap.add_argument("--labels", type=Path, default=default_labels, help="Path to pam_labels_k6.npy")
-    ap.add_argument("--encoded-drivers", type=Path, default=default_encoded, help="Path to drivers_encoded.csv (for respondent_id alignment)")
-    ap.add_argument("--outdir", type=Path, default=default_outdir, help="Output directory for PNG plots")
-    ap.add_argument("--k", type=int, default=6, help="k used for clustering (used in titles/filenames)")
-    return ap.parse_args(args=[])
-
-main()
+pct_feats = ["no_treat_mhd_bad_work", "mhd_hurt_career", "coworkers_view_neg_mhd"]
+for feat in pct_feats:
+    if feat not in df.columns:
+        continue
+    pct_df = cluster_answer_pct_table(df[feat], labels_aligned)
+    display(HTML(f"<b>{feat}</b>" + pct_df.to_html(index=False)))
