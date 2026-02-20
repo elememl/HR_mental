@@ -331,52 +331,31 @@ display(HTML("<b>FEATURE TYPE AUDIT</b><style>.feature-audit th:nth-child(3),.fe
 # Correlations before encoding using Spearman.
 
 #%% 
-def _to_numeric_or_codes(s):
-    numeric = pd.to_numeric(s, errors="coerce").astype(float)
-    codes = pd.Series(pd.Categorical(s.astype("string").str.strip()).codes, index=s.index).replace(-1, np.nan).astype(float)
-    return numeric.where(numeric.notna(), codes)
-
-feature_numeric = df_drivers.drop(columns=["respondent_id"]).apply(_to_numeric_or_codes)
-
-spearman_corr_matrix = feature_numeric.corr(method="spearman")
-pre_encoding_corr_table = (
-    spearman_corr_matrix.where(np.triu(np.ones(spearman_corr_matrix.shape, dtype=bool), k=1))
+feature_numeric = df_drivers.drop(columns="respondent_id").apply(lambda s: s.astype("string").str.strip().astype("category").cat.codes.replace(-1, np.nan).astype(float))
+corr_matrix = feature_numeric.corr(method="spearman")
+spearman_table = (
+    corr_matrix.where(np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1))
     .stack()
-    .rename("corr")
-    .reset_index()
-    .rename(columns={"level_0": "feature_1", "level_1": "feature_2"})
-    .loc[lambda d: d["corr"].abs().between(0.3, 0.99)]
+    .rename_axis(["feature_1", "feature_2"])
+    .reset_index(name="corr")
+    .query("0.3 <= abs(corr) <= 0.99")
     .sort_values("corr", key=lambda s: s.abs(), ascending=False)
-    .assign(corr=lambda d: d["corr"].round(3))
-    .reset_index(drop=True)
+    .assign(corr=lambda d: d["corr"].round(3)).reset_index(drop=True)
 )
-display(HTML("<b>Feature correlations (0.3 <= |corr| <= 0.99) - Spearman</b>" + pre_encoding_corr_table.to_html(index=False)))
+display(HTML("<b>Feature correlations (0.3 <= |corr| <= 0.99) - Spearman</b>" + spearman_table.to_html(index=False)))
 
-def _plot_spearman_filtered_heatmap(corr_matrix, min_abs_corr, title):
-    eligible_pairs = corr_matrix.abs() >= min_abs_corr
-    np.fill_diagonal(eligible_pairs.values, False)
-    selected = corr_matrix.columns[eligible_pairs.any(axis=0)].tolist()
-    heatmap_data = corr_matrix.loc[selected, selected]
-    n_feat = len(selected)
-    plt.figure(figsize=(min(26, max(8, 0.45 * n_feat)), min(24, max(6, 0.40 * n_feat))), dpi=150)
-    sns.heatmap(
-        heatmap_data,
-        cmap="coolwarm",
-        vmin=-1,
-        vmax=1,
-        center=0,
-        linewidths=0.2,
-        cbar_kws={"label": "Spearman correlation"},
-    )
-    plt.title(title)
+
+for threshold in (0.1, 0.3):
+    m = corr_matrix.abs().ge(threshold)
+    np.fill_diagonal(m.values, False)
+    cols = corr_matrix.columns[m.any(axis=0)]
+    plt.figure(figsize=(min(26, max(8, 0.45 * len(cols))), min(24, max(6, 0.40 * len(cols)))), dpi=150)
+    sns.heatmap(corr_matrix.loc[cols, cols], cmap="coolwarm", vmin=-1, vmax=1, center=0, linewidths=0.2, cbar_kws={"label": "Spearman correlation"})
+    plt.title(f"Spearman heatmap (|corr| >= {threshold})")
     plt.xticks(rotation=90, fontsize=7)
     plt.yticks(rotation=0, fontsize=7)
     plt.tight_layout()
     plt.show()
-
-
-_plot_spearman_filtered_heatmap(spearman_corr_matrix, 0.1, "Spearman heatmap for features with 0.1 <= |corr| <= 1")
-_plot_spearman_filtered_heatmap(spearman_corr_matrix, 0.3, "Spearman heatmap for features with 0.3 <= |corr| <= 1")
 
 
 #%% [markdown]
@@ -388,365 +367,82 @@ _plot_spearman_filtered_heatmap(spearman_corr_matrix, 0.3, "Spearman heatmap for
 NA_TOKEN = "Not applicable"
 IDK_TOKEN = "I don't know"
 
+NONE_SOME_ALL = {"None of them": 1, "Some of them": 2, "Yes, all of them": 3}
+NONE_SOME_ALL_DID = {"None did": 1, "Some did": 2, "Yes, they all did": 3}
+PREV_123 = {"No, at none of my previous employers": 1, "Some of my previous employers": 2, "Yes, at all of my previous employers": 3}
+MIXED_DEFAULT = {"na_tokens": (NA_TOKEN,), "idk_tokens": (), "collapse_map": {}}
+MIXED_V2_DEFAULT = {"na_tokens": (), "idk_tokens": (IDK_TOKEN,), "extra_flag_tokens": {}, "collapse_map": {}}
+ORDINAL_MAPS = {"company_size": {"1-5": 1, "6-25": 2, "26-100": 3, "100-500": 4, "500-1000": 5, "More than 1000": 6},
+                "remote_work": {"Never": 1, "Sometimes": 2, "Always": 3},
+                **{c: {"No": 1, "Maybe": 2, "Yes": 3} for c in ("ph_interview", "mh_interview", "bad_conseq_mh_boss", "bad_conseq_ph_boss", "mh_comfort_coworkers", "mh_comfort_supervisor")}}
 
-def normalize_text_or_na(x):
-    return str(x).strip()
-
-
-def encode_ordinal(series, mapping):
-    s = series.map(normalize_text_or_na).astype("string")
-    enc = s.map(mapping)
-
-    return enc.astype("float")
-
-
-ORDINAL_MAPS = {
-    "company_size": {
-        "1-5": 1,
-        "6-25": 2,
-        "26-100": 3,
-        "100-500": 4,
-        "500-1000": 5,
-        "More than 1000": 6,
-    },
-    "remote_work": {"Never": 1, "Sometimes": 2, "Always": 3},
-    "ph_interview": {"No": 1, "Maybe": 2, "Yes": 3},
-    "mh_interview": {"No": 1, "Maybe": 2, "Yes": 3},
-    "bad_conseq_mh_boss": {"No": 1, "Maybe": 2, "Yes": 3},
-    "bad_conseq_ph_boss": {"No": 1, "Maybe": 2, "Yes": 3},
-    "mh_comfort_coworkers": {"No": 1, "Maybe": 2, "Yes": 3},
-    "mh_comfort_supervisor": {"No": 1, "Maybe": 2, "Yes": 3},
-}
+def encode_ordinal(series, mapping): return series.astype("string").str.strip().map(mapping).astype("float")
 
 
-def encode_mixed_ord_plus_flags(df, feature, ord_mapping, na_tokens, idk_tokens, collapse_map):
-
-    raw = df[feature].map(normalize_text_or_na).astype("string")
-    collapsed = raw.replace(collapse_map)
-
-    out = pd.DataFrame(index=df.index)
-
-    col_na = f"{feature}__na"
-    out[col_na] = collapsed.isin(list(na_tokens)).astype(int)
-    if out[col_na].sum() == 0:
-        out = out.drop(columns=[col_na])
-
-    col_idk = f"{feature}__idk"
-    out[col_idk] = collapsed.isin(list(idk_tokens)).astype(int)
-    if out[col_idk].sum() == 0:
-        out = out.drop(columns=[col_idk])
-
-
-    ord_input = collapsed.copy()
-    mask_special = ord_input.isin(list(na_tokens)) | ord_input.isin(list(idk_tokens))
-
-    ord_input = ord_input.mask(mask_special, pd.NA)
-    out[f"{feature}_ord"] = encode_ordinal(ord_input, ord_mapping)
-
+def encode_mixed_ord_plus_flags(df, feature=None, ord_mapping=None, na_tokens=(), idk_tokens=(), collapse_map=None, extra_flag_tokens=None, specs=None):
+    if specs is not None:
+        return pd.concat((encode_mixed_ord_plus_flags(df=df, feature=f, **spec) for f, spec in specs.items()), axis=1)
+    extra_flag_tokens = {} if extra_flag_tokens is None else extra_flag_tokens
+    collapse_map = {} if collapse_map is None else collapse_map
+    collapsed = df[feature].astype("string").str.strip().replace(collapse_map)
+    flags = {
+        f"{feature}__na": collapsed.isin(na_tokens).astype(int),
+        f"{feature}__idk": collapsed.isin(idk_tokens).astype(int),
+        **{f"{feature}{suffix}": (collapsed == token).astype(int) for token, suffix in extra_flag_tokens.items()},
+    }
+    out = pd.DataFrame(flags).loc[:, lambda d: d.any(axis=0)]
+    special = {*na_tokens, *idk_tokens, *extra_flag_tokens}
+    out[f"{feature}_ord"] = encode_ordinal(collapsed.mask(collapsed.isin(special), pd.NA), ord_mapping)
     return out
 
 
 MIXED_SPECS = {
-    "friends_family_mhd_comfort": {
-        "ord_mapping": {
-            "Not open at all": 1,
-            "Somewhat not open": 2,
-            "Neutral": 3,
-            "Somewhat open": 4,
-            "Very open": 5,
-        },
-        "na_tokens": {"Not applicable to me (I do not have a mental illness)", NA_TOKEN},
-        "idk_tokens": set(),
-        "collapse_map": {},
-    },
-    "prev_observed_bad_conseq_mh": {
-        "ord_mapping": {
-            "None of them": 1,
-            "Some of them": 2,
-            "Yes, all of them": 3,
-            "Yes, all of them ": 3,
-        },
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": set(),
-        "collapse_map": {},
-    },
-    "bad_conseq_ph_prev_boss": {
-        "ord_mapping": {"None of them": 1, "Some of them": 2, "Yes, all of them": 3},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": set(),
-        "collapse_map": {},
-    },
-    "prev_resources": {
-        "ord_mapping": {"None did": 1, "Some did": 2, "Yes, they all did": 3},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": set(),
-        "collapse_map": {},
-    },
-    "mh_comfort_prev_coworkers": {
-        "ord_mapping": {
-            "No, at none of my previous employers": 1,
-            "Some of my previous employers": 2,
-            "Yes, at all of my previous employers": 3,
-        },
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": set(),
-        "collapse_map": {},
-    },
-    "leave_easy": {
-        "ord_mapping": {
-            "Very difficult": 1,
-            "Somewhat difficult": 2,
-            "Neither easy nor difficult": 3,
-            "Somewhat easy": 4,
-            "Very easy": 5,
-        },
-        "na_tokens": {NA_TOKEN, "Not applicable"},
-        "idk_tokens": {IDK_TOKEN},
-        "collapse_map": {},
-    },
-    "prev_mh_options_known": {
-        "ord_mapping": {
-            "No": 1,
-            "I was aware of some": 2,
-            "Yes, I was aware of all of them": 3,
-        },
-        "na_tokens": {NA_TOKEN, "Not applicable"},
-        "idk_tokens": set(),
-        "collapse_map": {
-            "N/A (not currently aware)": "No",
-            "No, I only became aware later": "No",
-        },
-    },
+    "friends_family_mhd_comfort": {**MIXED_DEFAULT, "ord_mapping": {"Not open at all": 1, "Somewhat not open": 2, "Neutral": 3, "Somewhat open": 4, "Very open": 5},
+                                   "na_tokens": ("Not applicable to me (I do not have a mental illness)", NA_TOKEN)},
+    **{f: {**MIXED_DEFAULT, "ord_mapping": NONE_SOME_ALL, "na_tokens": ()} for f in ("prev_observed_bad_conseq_mh", "bad_conseq_ph_prev_boss")},
+    "prev_resources": {**MIXED_DEFAULT, "ord_mapping": NONE_SOME_ALL_DID, "na_tokens": ()},
+    "mh_comfort_prev_coworkers": {**MIXED_DEFAULT, "ord_mapping": PREV_123, "na_tokens": ()},
+    "leave_easy": {**MIXED_DEFAULT, "ord_mapping": {"Very difficult": 1, "Somewhat difficult": 2, "Neither easy nor difficult": 3, "Somewhat easy": 4, "Very easy": 5},
+                   "na_tokens": (NA_TOKEN, "Not applicable"), "idk_tokens": (IDK_TOKEN,)},
+    "prev_mh_options_known": {**MIXED_DEFAULT, "ord_mapping": {"No": 1, "I was aware of some": 2, "Yes, I was aware of all of them": 3}, "na_tokens": (),
+                              "collapse_map": {"N/A (not currently aware)": "No", "No, I only became aware later": "No"}},
 }
 
 
-def encode_mixed_ord_plus_flags_v2(
-    df,
-    feature,
-    ord_mapping,
-    na_tokens,
-    idk_tokens,
-    extra_flag_tokens,
-    collapse_map,
-):
-    raw = df[feature].map(normalize_text_or_na).astype("string")
-    collapsed = raw.replace(collapse_map)
-
-    out = pd.DataFrame(index=df.index)
-
-    col_na = f"{feature}__na"
-    out[col_na] = collapsed.isin(list(na_tokens)).astype(int)
-    if out[col_na].sum() == 0:
-        out = out.drop(columns=[col_na])
-
-    col_idk = f"{feature}__idk"
-    out[col_idk] = collapsed.isin(list(idk_tokens)).astype(int)
-    if out[col_idk].sum() == 0:
-        out = out.drop(columns=[col_idk])
-
-
-    for token, suffix in extra_flag_tokens.items():
-        col = f"{feature}{suffix}"
-        out[col] = (collapsed == token).astype(int)
-        if out[col].sum() == 0:
-            out = out.drop(columns=[col])
-
-
-    ord_input = collapsed.copy()
-    mask_special = (
-        ord_input.isin(list(na_tokens))
-        | ord_input.isin(list(idk_tokens))
-        | ord_input.isin(list(extra_flag_tokens.keys()))
-    )
-
-    ord_input = ord_input.mask(mask_special, pd.NA)
-    out[f"{feature}_ord"] = encode_ordinal(ord_input, ord_mapping)
-
-    return out
-
-
-MIXED_SPECS_V2 = {
-
-    "ever_observed_mhd_bad_response": {
-        "ord_mapping": {
-            "No": 0,
-            "Yes, I observed": 1,
-            "Yes, I experienced": 2,
-        },
-        "na_tokens": set(),
-        "idk_tokens": {"Maybe/Not sure", IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-
-
-    "prev_anonymity_protected": {
-        "ord_mapping": {"No": 0, "Sometimes": 1, "Yes, always": 2},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-    "bad_conseq_mh_prev_boss": {
-        "ord_mapping": {"None of them": 0, "Some of them": 1, "Yes, all of them": 2},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-    "mh_ph_prev_boss_serious": {
-        "ord_mapping": {"None did": 0, "Some did": 1, "Yes, they all did": 2},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-    "prev_boss_mh_discuss": {
-        "ord_mapping": {"None did": 0, "Some did": 1, "Yes, they all did": 2},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-    "mh_comfort_prev_supervisor": {
-        "ord_mapping": {
-            "No, at none of my previous employers": 0,
-            "Some of my previous employers": 1,
-            "Yes, at all of my previous employers": 2,
-        },
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
-    "prev_benefits": {
-
-        "ord_mapping": {"No, none did": 0, "Some did": 1, "Yes, they all did": 2},
-        "na_tokens": {NA_TOKEN},
-        "idk_tokens": {IDK_TOKEN},
-        "extra_flag_tokens": {},
-        "collapse_map": {},
-    },
+MIXED_V2_ORD_MAPS = {
+    "ever_observed_mhd_bad_response": {"No": 0, "Yes, I observed": 1, "Yes, I experienced": 2},
+    "prev_anonymity_protected": {"No": 0, "Sometimes": 1, "Yes, always": 2},
+    "bad_conseq_mh_prev_boss": NONE_SOME_ALL,
+    **{f: NONE_SOME_ALL_DID for f in ("mh_ph_prev_boss_serious", "prev_boss_mh_discuss")},
+    "mh_comfort_prev_supervisor": PREV_123,
+    "prev_benefits": {"No, none did": 1, "Some did": 2, "Yes, they all did": 3},
 }
+MIXED_V2_OVERRIDES = {"ever_observed_mhd_bad_response": {"idk_tokens": ("Maybe/Not sure", IDK_TOKEN)}}
+MIXED_SPECS_V2 = {feature: {**MIXED_V2_DEFAULT, "ord_mapping": mapping, **MIXED_V2_OVERRIDES.get(feature, {})} for feature, mapping in MIXED_V2_ORD_MAPS.items()}
 
 
-df = df_drivers.copy()
+df = df_drivers
 
 
 binary_cols = ["tech_company", "prev_boss", "observed_mhdcoworker_bad_conseq"]
-
-for c in binary_cols:
-    df[c] = pd.to_numeric(df[c], errors="raise")
-
-out = pd.DataFrame({"respondent_id": df["respondent_id"]})
-for c in binary_cols:
-    out[c] = df[c].astype(int)
+out = df[["respondent_id", *binary_cols]].astype({c: int for c in binary_cols}).copy()
 
 
-nominal_cols = [
-    "anonymity_protected",
-    "mh_family_history",
-    "mh_ph_boss_serious",
-    "boss_mh_discuss",
-    "resources",
-    "benefits",
-    "mh_options_known",
-    "mhdcoworker_you_not_reveal",
-]
+nominal_cols = ["anonymity_protected", "mh_family_history", "mh_ph_boss_serious", "boss_mh_discuss",
+                "resources", "benefits", "mh_options_known", "mhdcoworker_you_not_reveal"]
 
 
-X_nom = df[nominal_cols].copy()
-X_nom = X_nom.fillna("NaN")
-for c in nominal_cols:
-    X_nom[c] = X_nom[c].astype(str).str.strip()
-
-nom_dum = pd.get_dummies(X_nom, prefix=nominal_cols, prefix_sep="=")
+nom = df[nominal_cols].fillna("NaN").astype("string").apply(lambda s: s.str.strip())
+out = out.join(pd.get_dummies(nom, prefix=nominal_cols, prefix_sep="="))
 
 
-out = out.join(nom_dum)
+ordinal_cols = ["company_size", "remote_work", "ph_interview", "mh_interview",
+                "bad_conseq_mh_boss", "bad_conseq_ph_boss", "mh_comfort_coworkers", "mh_comfort_supervisor"]
 
 
-ordinal_cols = [
-    "company_size",
-    "remote_work",
-    "ph_interview",
-    "mh_interview",
-    "bad_conseq_mh_boss",
-    "bad_conseq_ph_boss",
-    "mh_comfort_coworkers",
-    "mh_comfort_supervisor",
-]
-
-
-ord_out = pd.DataFrame(index=df.index)
-
-for c in ordinal_cols:
-    mapping = ORDINAL_MAPS[c]
-    ord_out[f"{c}_ord"] = encode_ordinal(df[c], mapping)
-
-out = out.join(ord_out)
-
-
-mixed_cols = list(MIXED_SPECS.keys())
-no_na_flag_features = {
-    "prev_observed_bad_conseq_mh",
-    "bad_conseq_ph_prev_boss",
-    "prev_resources",
-    "mh_comfort_prev_coworkers",
-    "prev_mh_options_known",
-    "prev_anonymity_protected",
-    "bad_conseq_mh_prev_boss",
-    "mh_ph_prev_boss_serious",
-    "prev_boss_mh_discuss",
-    "mh_comfort_prev_supervisor",
-    "prev_benefits",
-}
-
-mixed_out = pd.DataFrame(index=df.index)
-
-for c in mixed_cols:
-    spec = MIXED_SPECS[c]
-    na_tokens = set() if c in no_na_flag_features else spec["na_tokens"]
-    enc_block = encode_mixed_ord_plus_flags(
-        df=df,
-        feature=c,
-        ord_mapping=spec["ord_mapping"],
-        na_tokens=na_tokens,
-        idk_tokens=spec["idk_tokens"],
-        collapse_map=spec["collapse_map"],
-    )
-
-
-    mixed_out = mixed_out.join(enc_block)
-
-out = out.join(mixed_out)
-
-
-mixed_v2_cols = list(MIXED_SPECS_V2.keys())
-
-mixed_v2_out = pd.DataFrame(index=df.index)
-
-for c in mixed_v2_cols:
-    spec = MIXED_SPECS_V2[c]
-    na_tokens = set() if c in no_na_flag_features else spec["na_tokens"]
-    enc_block = encode_mixed_ord_plus_flags_v2(
-        df=df,
-        feature=c,
-        ord_mapping=spec["ord_mapping"],
-        na_tokens=na_tokens,
-        idk_tokens=spec["idk_tokens"],
-        extra_flag_tokens=spec["extra_flag_tokens"],
-        collapse_map=spec["collapse_map"],
-    )
-
-
-    mixed_v2_out = mixed_v2_out.join(enc_block)
-
-out = out.join(mixed_v2_out)
-
-
-bool_cols = out.select_dtypes(include=["bool"]).columns.tolist()
-out[bool_cols] = out[bool_cols].astype(int)
+out = out.join(pd.DataFrame({f"{c}_ord": encode_ordinal(df[c], ORDINAL_MAPS[c]) for c in ordinal_cols}, index=df.index))
+out = out.join(encode_mixed_ord_plus_flags(df=df, specs={**MIXED_SPECS, **MIXED_SPECS_V2}))
+out = out.astype({c: int for c in out.select_dtypes(include=["bool"]).columns})
 
 
 #%% [markdown]
@@ -757,27 +453,19 @@ out[bool_cols] = out[bool_cols].astype(int)
 
 
 X = out.drop(columns=["respondent_id"]).apply(pd.to_numeric, errors="raise").to_numpy(dtype=np.float64)
-col_min = np.nanmin(X, axis=0)
-col_max = np.nanmax(X, axis=0)
-ranges = col_max - col_min
+ranges = np.nanmax(X, axis=0) - np.nanmin(X, axis=0)
 n = X.shape[0]
 valid_feat = np.isfinite(ranges) & (ranges > 0)
-Xv = X[:, valid_feat]
-rv = ranges[valid_feat]
-finite_mask = np.isfinite(Xv)
+Xv, rv = X[:, valid_feat], ranges[valid_feat]
+finite = np.isfinite(Xv)
 D = np.zeros((n, n), dtype=np.float64)
 for i0 in range(0, n, 256):
     i1 = min(n, i0 + 256)
-    A = Xv[i0:i1, :]
-    comp = finite_mask[i0:i1, :][:, None, :] & finite_mask[None, :, :]
-    diff = np.where(comp, np.abs(A[:, None, :] - Xv[None, :, :]) / rv[None, None, :], 0.0)
+    comp = finite[i0:i1, :][:, None, :] & finite[None, :, :]
+    diff = np.abs(Xv[i0:i1, :][:, None, :] - Xv[None, :, :]) / rv[None, None, :]
+    numer = np.where(comp, diff, 0.0).sum(axis=2)
     denom = comp.sum(axis=2)
-    numer = diff.sum(axis=2)
-    block = np.empty((i1 - i0, n), dtype=np.float64)
-    good = denom > 0
-    block[good] = numer[good] / denom[good]
-    block[~good] = 1.0
-    D[i0:i1, :] = block
+    D[i0:i1, :] = np.where(denom > 0, numer / denom, 1.0)
 D = ((D + D.T) / 2.0).astype(np.float32)
 np.fill_diagonal(D, 0.0)
 
