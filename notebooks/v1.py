@@ -8,7 +8,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-import itertools
+import logging
 import re
 import warnings
 
@@ -23,6 +23,8 @@ from matplotlib import MatplotlibDeprecationWarning
 from sklearn.metrics import adjusted_rand_score, silhouette_samples
 from sklearn_extra.cluster import KMedoids
 from umap import UMAP
+
+logging.basicConfig(level=logging.ERROR, force=True)
 
 pd.set_option("display.max_columns", 200)
 pd.set_option("display.width", 160)
@@ -659,46 +661,31 @@ display(HTML(fig.to_html(include_plotlyjs="cdn")))
 # ### 10. Cluster Profiles
 # Cluster-level patterns and pairwise separations are examined for the selected k=6 solution.
 
+def normalize_text(x, na_label=None, lower=False, normalize_quotes=False):
+    quote_map = str.maketrans({"’": "'", "“": '"', "”": '"'})
+
+    def clean(v):
+        s = na_label if (na_label is not None and pd.isna(v)) else str(v)
+        if normalize_quotes:
+            s = s.translate(quote_map)
+        s = re.sub(r"\s+", " ", s.replace("\u00a0", " ").strip())
+        if lower:
+            s = s.lower()
+        return na_label if (na_label is not None and s == "") else s
+
+    return x.map(clean) if isinstance(x, pd.Series) else clean(x)
+
+
 def _normalize_categorical_frame(df_raw):
-    features = [c for c in df_raw.columns if c != "respondent_id"]
-    df_norm = df_raw[features].copy()
-    for col in features:
-        s = df_norm[col].astype(object)
-        s[pd.isna(s)] = "NA"
-        df_norm[col] = s.astype(str).str.strip().replace({"": "NA"})
+    df_norm = df_raw.drop(columns="respondent_id", errors="ignore").apply(lambda s: normalize_text(s, na_label="NA"))
+    features = df_norm.columns.tolist()
     return df_norm, features
 
 
-def _build_raw_pairwise_diff_matrix(df_raw, labels_aligned):
-    df_norm, features = _normalize_categorical_frame(df_raw)
-    clusters = sorted(np.unique(labels_aligned).tolist())
-    pairs = list(itertools.combinations(clusters, 2))
-
-    rows = []
-    for feat in features:
-        s_all = df_norm[feat]
-        labels_use = labels_aligned
-        cats = s_all.value_counts(dropna=False).index.tolist()
-
-        for cat in cats:
-            row = {"feature": f"{feat}={cat}"}
-            for c1, c2 in pairs:
-                s1 = s_all[labels_use == c1]
-                s2 = s_all[labels_use == c2]
-                denom1 = float(len(s1))
-                denom2 = float(len(s2))
-                p1 = float((s1 == cat).sum()) / denom1
-                p2 = float((s2 == cat).sum()) / denom2
-                row[f"C{c1}-C{c2}"] = abs(p1 - p2)
-            rows.append(row)
-
-    df = pd.DataFrame(rows).set_index("feature")
-    return df
-
-def _align_labels_by_respondent_id(df_target, labels, respondent_ids_source):
+def labels_by_id(df_target, labels, respondent_ids_source):
     id_to_label = pd.Series(labels, index=respondent_ids_source).to_dict()
-    mapped = df_target["respondent_id"].map(id_to_label).to_numpy()
-    return mapped.astype(int)
+    aligned_labels = df_target["respondent_id"].map(id_to_label).to_numpy()
+    return aligned_labels.astype(int)
 
 
 def plot_raw_feature_panel(df_raw, labels_aligned, features, suptitle, ncols=3, color_map=None, recode_map=None, legend_mode="shared", legend_order=None):
@@ -711,281 +698,189 @@ def plot_raw_feature_panel(df_raw, labels_aligned, features, suptitle, ncols=3, 
 
     clusters = sorted(np.unique(labels_aligned).tolist())
     x = np.arange(len(clusters))
+    cluster_series = pd.Series(labels_aligned, name="cluster")
 
-    recode_map = {} if recode_map is None else recode_map
-    legend_order = [] if legend_order is None else legend_order
-    def _normalize_for_plot(series):
-        series = series.astype(object)
-        series[pd.isna(series)] = "NA"
-        return series.astype(str).str.strip().replace({"": "NA"})
+    recode_map = recode_map or {}
+    legend_order = legend_order or []
 
-    series_by_feature = {
-        feat: _normalize_for_plot(recode_map.get(feat, lambda s: s)(df_raw[feat].copy()))
-        for feat in features
-    }
-    all_categories = []
-    for feat in features:
-        all_categories.extend(series_by_feature[feat].value_counts(dropna=False).index.tolist())
-    all_categories = list(dict.fromkeys(all_categories))
+    series_by_feature = {feat: normalize_text(recode_map[feat](df_raw[feat]) if feat in recode_map else df_raw[feat], na_label="NA")
+                         for feat in features}
+    all_categories = list(dict.fromkeys(cat for s in series_by_feature.values()
+                                        for cat in s.value_counts(dropna=False).index))
 
 
-    color_for_cat = dict(color_map)
+    color_for_cat = dict(color_map or {})
     palette = plt.get_cmap("tab20").colors
-    for idx, c in enumerate([c for c in all_categories if c not in color_for_cat]):
-        color_for_cat[c] = palette[idx % len(palette)]
+    missing_cats = [c for c in all_categories if c not in color_for_cat]
+    color_for_cat.update({c: palette[i % len(palette)] for i, c in enumerate(missing_cats)})
 
     for i, feat in enumerate(features):
         ax = axes[i]
         series = series_by_feature[feat]
-
-        overall_counts = series.value_counts(dropna=False)
-        categories = overall_counts.index.tolist()
-
-        mat = []
-        for cluster_id in clusters:
-            cluster_series = series[labels_aligned == cluster_id]
-            cluster_value_counts = cluster_series.value_counts(dropna=False)
-            total = len(cluster_series)
-            props = [float(cluster_value_counts.get(cat, 0)) / total for cat in categories]
-            mat.append(props)
-        mat = np.array(mat, dtype=float)
+        categories = series.value_counts(dropna=False).index
+        mat = pd.crosstab(cluster_series, series, normalize="index").reindex(index=clusters, columns=categories, fill_value=0.0).to_numpy(float)
 
         bottom = np.zeros(len(clusters), dtype=float)
         for j, cat in enumerate(categories):
-            color = color_for_cat.get(cat)
-            ax.bar(
-                x,
-                mat[:, j],
-                bottom=bottom,
-                label=str(cat),
-                color=color,
-                edgecolor="none",
-                linewidth=0.0,
-                antialiased=False,
-            )
+            ax.bar(x, mat[:, j], bottom=bottom, label=str(cat), color=color_for_cat[cat])
             bottom += mat[:, j]
 
-        ax.set_xticks(x, [str(c) for c in clusters])
-        ax.set_ylim(0, 1.0)
-        ax.set_xlabel("")
-        ax.set_title(feat)
+        ax.set(xticks=x, xticklabels=[str(c) for c in clusters], ylim=(0, 1.0), xlabel="", title=feat)
         if legend_mode == "per_subplot":
             ax.legend(title="Answer", bbox_to_anchor=(1.02, 1.0), loc="upper left", fontsize=7)
 
-    for j in range(n, len(axes)):
-        axes[j].axis("off")
+    for ax_extra in axes[n:]:
+        ax_extra.axis("off")
 
     fig.suptitle(suptitle, y=0.99, fontsize=14)
     fig.text(0.02, 0.5, "Proportion within cluster", va="center", rotation="vertical")
     fig.supxlabel("Cluster", y=0.01)
 
-    ordered = [c for c in legend_order if c in all_categories]
-    extras = [c for c in all_categories if c not in ordered]
-    legend_cats = ordered + extras
+    all_cat_set = set(all_categories)
+    ordered = [c for c in legend_order if c in all_cat_set]
+    legend_cats = ordered + [c for c in all_categories if c not in set(ordered)]
     legend_handles = [mpatches.Patch(color=color_for_cat[c], label=c) for c in legend_cats]
     if legend_mode == "shared":
-        fig.legend(
-            handles=legend_handles,
-            title="Answer",
-            loc="upper left",
-            bbox_to_anchor=(0.885, 0.98),
-            fontsize=8,
-        )
-        plt.tight_layout(rect=[0.04, 0.03, 0.86, 0.96])
-    else:
-        plt.tight_layout(rect=[0.04, 0.03, 1, 0.96])
+        fig.legend(handles=legend_handles, title="Answer", loc="upper left", bbox_to_anchor=(0.885, 0.98), fontsize=8)
+    right = 0.86 if legend_mode == "shared" else 1
+    plt.tight_layout(rect=[0.04, 0.03, right, 0.96])
     plt.show()
     plt.close(fig)
 
 
-def make_all_raw_feature_plots(df_raw, labels_aligned):
-    raw_global_color_map = {}
-    for color, labels in [
-        ("#2ca02c", ["Yes", "1", "Always", "100-500", "None of them", "Yes, all", "easy", "open"]),
-        ("#d62728", ["No", "0", "Never", "6-25", "Yes, all of them", "difficult", "No or not eligible for coverage", "not open"]),
-        ("#1f77b4", ["Maybe", "Sometimes", "1-5", "Some of them", "Maybe/Not sure", "I am not sure"]),
-        ("#ff7f0e", ["Some", "Yes, I observed"]),
-        ("#9467bd", ["Only became aware later", "No response", "Neither easy nor difficult"]),
-        ("#4aa3df", ["I don't know"]),
-        ("#f1c40f", ["Neutral"]),
-        ("#8c564b", ["Yes, I experienced"]),
-        ("#7f7f7f", ["Not applicable"]),
-    ]:
-        raw_global_color_map.update({label: color for label in labels})
-
-    def _normalize_text_with_na(s, na_label):
-        return s.astype(object).where(~pd.isna(s), other=na_label).astype(str).str.strip().replace({"": na_label})
+RAW_GLOBAL_COLOR_PAIRS = [
+    ("#2ca02c", ["Yes", "1", "Always", "100-500", "None of them", "Yes, all", "easy", "open"]),
+    ("#d62728", ["No", "0", "Never", "6-25", "Yes, all of them", "difficult", "No or not eligible for coverage", "not open"]),
+    ("#1f77b4", ["Maybe", "Sometimes", "1-5", "Some of them", "Maybe/Not sure", "I am not sure"]),
+    ("#ff7f0e", ["Some", "Yes, I observed"]),
+    ("#9467bd", ["Only became aware later", "No response", "Neither easy nor difficult"]),
+    ("#4aa3df", ["I don't know"]),
+    ("#f1c40f", ["Neutral"]),
+    ("#8c564b", ["Yes, I experienced"]),
+    ("#7f7f7f", ["Not applicable"]),
+]
+RAW_GLOBAL_COLOR_MAP = {label: color for color, labels in RAW_GLOBAL_COLOR_PAIRS for label in labels}
 
 
-    panel_features = [
-        "remote_work",
-        "tech_company",
-        "mh_interview",
-        "company_size",
-        "prev_boss",
-        "ph_interview",
-        "bad_conseq_ph_prev_boss",
-        "observed_mhdcoworker_bad_conseq",
-        "bad_conseq_ph_boss",
-    ]
-    plot_raw_feature_panel(
-        df_raw=df_raw,
-        labels_aligned=labels_aligned,
-        features=panel_features,
-        suptitle="Feature distributions across 6 clusters (weak separators — mostly uniform distributions)",
-        ncols=3,
-        color_map=raw_global_color_map,
-        legend_mode="per_subplot",
-    )
+def _expand_canonical_map(canonical_map):
+    return {raw: canonical for canonical, raws in canonical_map.items() for raw in raws}
 
 
-    panel_features = [
-        "benefits",
-        "mh_ph_boss_serious",
-        "leave_easy",
-        "resources",
-        "bad_conseq_mh_boss",
-        "mh_comfort_coworkers",
-        "mh_options_known",
-        "anonymity_protected",
-        "mh_comfort_supervisor",
-    ]
-
-    recode_benefits_map = {"Not eligible for coverage / N/A": "No or not eligible for coverage", "No": "No or not eligible for coverage"}
-    recode_leave_easy_map = {"Very difficult": "difficult", "Somewhat difficult": "difficult", "Very easy": "easy", "Somewhat easy": "easy"}
-
-    def recode_benefits(s):
-        return _normalize_text_with_na(s, "NA").replace(recode_benefits_map)
-
-    def recode_leave_easy(s):
-        return _normalize_text_with_na(s, "NA").replace(recode_leave_easy_map)
-
-    recode_map = {
-        "benefits": recode_benefits,
-        "leave_easy": recode_leave_easy,
-    }
-    plot_raw_feature_panel(
-        df_raw=df_raw,
-        labels_aligned=labels_aligned,
-        features=panel_features,
-        suptitle="Feature distributions across 6 clusters (strong separators)",
-        ncols=3,
-        color_map=raw_global_color_map,
-        recode_map=recode_map,
-        legend_mode="shared",
-    )
-
-
-    panel_features = [
-        "prev_benefits",
-        "mh_ph_prev_boss_serious",
-        "mh_comfort_prev_coworkers",
-        "prev_resources",
-        "bad_conseq_mh_prev_boss",
-        "mh_comfort_prev_supervisor",
-        "prev_mh_options_known",
-        "prev_boss_mh_discuss",
-        "prev_anonymity_protected",
-    ]
-
-    recode_prev_map = {
-        raw: canonical
-        for canonical, raws in {
+PLOT_RECODE_SPECS = {
+    "benefits": {
+        "na_label": "NA",
+        "mapping": {"Not eligible for coverage / N/A": "No or not eligible for coverage", "No": "No or not eligible for coverage"},
+    },
+    "leave_easy": {
+        "na_label": "NA",
+        "mapping": {"Very difficult": "difficult", "Somewhat difficult": "difficult", "Very easy": "easy", "Somewhat easy": "easy"},
+    },
+    "prev": {
+        "na_label": "Not applicable",
+        "mapping": _expand_canonical_map({
             "No": ["No, none did", "None of them", "No, at none of my previous employers", "No", "N/A (not currently aware)", "None did"],
             "Yes, all": ["Yes, they all did", "Yes, I was aware of all of them", "Yes, all of them", "Yes, at all of my previous employers", "Yes, always", "yes, always"],
             "Some": ["Some did", "I was aware of some", "Some of them", "Some of my previous employers", "Sometimes"],
             "Only became aware later": ["No, I only became aware later"],
-        }.items()
-        for raw in raws
-    }
-
-    def recode_prev_answers(s):
-        return _normalize_text_with_na(s, "Not applicable").replace(recode_prev_map)
-
-    recode_map = {feat: recode_prev_answers for feat in panel_features}
-    legend_order = ["Yes, all", "Some", "No", "Only became aware later", "I don't know", "Not applicable"]
-    plot_raw_feature_panel(
-        df_raw=df_raw,
-        labels_aligned=labels_aligned,
-        features=panel_features,
-        suptitle="Previous employment feature distributions across 6 clusters",
-        ncols=3,
-        color_map=raw_global_color_map,
-        recode_map=recode_map,
-        legend_mode="shared",
-        legend_order=legend_order,
-    )
-
-
-    panel_features = [
-        "prev_observed_bad_conseq_mh",
-        "mh_family_history",
-        "mhdcoworker_you_not_reveal",
-        "friends_family_mhd_comfort",
-        "ever_observed_mhd_bad_response",
-        "boss_mh_discuss",
-    ]
-
-    recode_stigma_map = {
-        raw: canonical
-        for canonical, raws in {
+        }),
+    },
+    "stigma": {
+        "na_label": "Not applicable",
+        "mapping": _expand_canonical_map({
             "Not applicable": ["", "Not applicable to me (I do not have a mental illness)"],
             "open": ["Somewhat open", "Very open"],
             "not open": ["Somewhat not open", "Not open at all"],
-        }.items()
-        for raw in raws
-    }
-
-    def recode_stigma(s):
-        return _normalize_text_with_na(s, "Not applicable").replace(recode_stigma_map)
-
-    recode_map = {feat: recode_stigma for feat in panel_features}
-    plot_raw_feature_panel(
-        df_raw=df_raw,
-        labels_aligned=labels_aligned,
-        features=panel_features,
-        suptitle="Distribution of stigma-related indicators across 6 clusters",
-        ncols=3,
-        color_map=raw_global_color_map,
-        recode_map=recode_map,
-        legend_mode="per_subplot",
-    )
+        }),
+    },
+}
 
 
-def build_raw_cluster_vs_rest_tables(df_raw, labels_aligned, top_n=15, exclude_answer_substrings=None):
+def _make_series_recode(mapping, na_label):
+    def _recode(series):
+        return normalize_text(series, na_label=na_label).replace(mapping)
+    return _recode
+
+
+def build_feature_plots(df_raw, labels_aligned):
+    weak_panel_features = [
+        "remote_work", "tech_company", "mh_interview", "company_size", "prev_boss",
+        "ph_interview", "bad_conseq_ph_prev_boss", "observed_mhdcoworker_bad_conseq", "bad_conseq_ph_boss",
+    ]
+    strong_panel_features = [
+        "benefits", "mh_ph_boss_serious", "leave_easy", "resources", "bad_conseq_mh_boss",
+        "mh_comfort_coworkers", "mh_options_known", "anonymity_protected", "mh_comfort_supervisor",
+    ]
+    prev_panel_features = [
+        "prev_benefits", "mh_ph_prev_boss_serious", "mh_comfort_prev_coworkers", "prev_resources",
+        "bad_conseq_mh_prev_boss", "mh_comfort_prev_supervisor", "prev_mh_options_known", "prev_boss_mh_discuss", "prev_anonymity_protected",
+    ]
+    stigma_panel_features = [
+        "prev_observed_bad_conseq_mh", "mh_family_history", "mhdcoworker_you_not_reveal",
+        "friends_family_mhd_comfort", "ever_observed_mhd_bad_response", "boss_mh_discuss",
+    ]
+    recode_fns = {name: _make_series_recode(spec["mapping"], spec["na_label"]) for name, spec in PLOT_RECODE_SPECS.items()}
+
+    panel_specs = [
+        {
+            "features": weak_panel_features,
+            "suptitle": "Feature distributions across 6 clusters (weak separators — mostly uniform distributions)",
+            "legend_mode": "per_subplot",
+        },
+        {
+            "features": strong_panel_features,
+            "suptitle": "Feature distributions across 6 clusters (strong separators)",
+            "legend_mode": "shared",
+            "recode_map": {"benefits": recode_fns["benefits"], "leave_easy": recode_fns["leave_easy"]},
+        },
+        {
+            "features": prev_panel_features,
+            "suptitle": "Previous employment feature distributions across 6 clusters",
+            "legend_mode": "shared",
+            "recode_map": {feat: recode_fns["prev"] for feat in prev_panel_features},
+            "legend_order": ["Yes, all", "Some", "No", "Only became aware later", "I don't know", "Not applicable"],
+        },
+        {
+            "features": stigma_panel_features,
+            "suptitle": "Distribution of stigma-related indicators across 6 clusters",
+            "legend_mode": "per_subplot",
+            "recode_map": {feat: recode_fns["stigma"] for feat in stigma_panel_features},
+        },
+    ]
+
+    for spec in panel_specs:
+        plot_raw_feature_panel(df_raw=df_raw, labels_aligned=labels_aligned, ncols=3, color_map=RAW_GLOBAL_COLOR_MAP, **spec)
+
+
+def pct_rows(df_norm, features, mask_a, mask_b, left_col, right_col, selected_features_lc=None):
+    rows = []
+    for feat in features:
+        s_all = df_norm[feat]
+        s_a, s_b = s_all[mask_a], s_all[mask_b]
+        vc_a, vc_b = s_a.value_counts(dropna=False), s_b.value_counts(dropna=False)
+        denom_a, denom_b = len(s_a), len(s_b)
+
+        for cat in s_all.value_counts(dropna=False).index:
+            feature_key = f"{feat}={cat}"
+            if selected_features_lc and feature_key.strip().lower() not in selected_features_lc:
+                continue
+
+            p_a, p_b = vc_a.get(cat, 0) / denom_a, vc_b.get(cat, 0) / denom_b
+            rows.append({"feature": feature_key, left_col: f"{p_a*100:.1f}%", right_col: f"{p_b*100:.1f}%", "_diff": abs(p_a - p_b)})
+    return rows
+
+
+def cluster_vs_rest_table(df_raw, labels_aligned, top_n=15, exclude_subs=None):
     df_norm, features = _normalize_categorical_frame(df_raw)
     clusters = sorted(np.unique(labels_aligned).tolist())
     results = {}
-    exclude_answer_substrings = {} if exclude_answer_substrings is None else exclude_answer_substrings
+    exclude_subs = {} if exclude_subs is None else exclude_subs
 
     for c in clusters:
         in_cluster = labels_aligned == c
-        rows = []
-        for feat in features:
-            s_all = df_norm[feat]
-            cats = s_all.value_counts(dropna=False).index.tolist()
-
-            s_c = s_all[in_cluster]
-            s_r = s_all[~in_cluster]
-            vc_c = s_c.value_counts(dropna=False)
-            vc_r = s_r.value_counts(dropna=False)
-            denom_c = float(len(s_c))
-            denom_r = float(len(s_r))
-
-            for cat in cats:
-                p_c = float(vc_c.get(cat, 0)) / denom_c
-                p_r = float(vc_r.get(cat, 0)) / denom_r
-                rows.append(
-                    {
-                        "feature": f"{feat}={cat}",
-                        "cluster_%": f"{p_c*100:.1f}%",
-                        "rest_%": f"{p_r*100:.1f}%",
-                        "_diff": abs(p_c - p_r),
-                    }
-                )
+        rows = pct_rows(df_norm, features, in_cluster, ~in_cluster, "cluster_%", "rest_%")
 
         df_all = pd.DataFrame(rows).sort_values("_diff", ascending=False)
-        subs = [s.strip().lower() for s in exclude_answer_substrings.get(int(c), [])]
+        subs = [s.strip().lower() for s in exclude_subs.get(int(c), [])]
         df_all = df_all[df_all["feature"].str.lower().map(lambda lx: not any(sub in lx for sub in subs))]
         df = df_all.head(top_n).drop(columns="_diff")
         results[int(c)] = df.reset_index(drop=True)
@@ -998,65 +893,18 @@ def build_raw_cluster_vs_rest_selected(df_raw, labels_aligned, cluster_id, selec
     selected_lc = {x.strip().lower() for x in selected_features}
 
     in_cluster = labels_aligned == cluster_id
-    rows = []
-    for feat in features:
-        s_all = df_norm[feat]
-        cats = s_all.value_counts(dropna=False).index.tolist()
-
-        s_c = s_all[in_cluster]
-        s_r = s_all[~in_cluster]
-        vc_c = s_c.value_counts(dropna=False)
-        vc_r = s_r.value_counts(dropna=False)
-        denom_c = float(len(s_c))
-        denom_r = float(len(s_r))
-
-        for cat in cats:
-            key = f"{feat}={cat}"
-            if key.strip().lower() not in selected_lc:
-                continue
-            p_c = float(vc_c.get(cat, 0)) / denom_c
-            p_r = float(vc_r.get(cat, 0)) / denom_r
-            rows.append(
-                {
-                    "feature": key,
-                    "cluster_%": f"{p_c*100:.1f}%",
-                    "rest_%": f"{p_r*100:.1f}%",
-                }
-            )
-
-    return pd.DataFrame(rows)
+    rows = pct_rows(df_norm, features, in_cluster, ~in_cluster, "cluster_%", "rest_%", selected_lc)
+    return pd.DataFrame(rows).drop(columns="_diff", errors="ignore")
 
 
-def build_raw_pairwise_tables(df_raw, labels_aligned, pairs, top_n=15):
+def pairwise_tables(df_raw, labels_aligned, pairs, top_n=15):
     df_norm, features = _normalize_categorical_frame(df_raw)
     results = {}
 
     for c1, c2 in pairs:
         mask1 = labels_aligned == c1
         mask2 = labels_aligned == c2
-        rows = []
-        for feat in features:
-            s_all = df_norm[feat]
-            cats = s_all.value_counts(dropna=False).index.tolist()
-
-            s_1 = s_all[mask1]
-            s_2 = s_all[mask2]
-            vc1 = s_1.value_counts(dropna=False)
-            vc2 = s_2.value_counts(dropna=False)
-            denom1 = float(len(s_1))
-            denom2 = float(len(s_2))
-
-            for cat in cats:
-                p1 = float(vc1.get(cat, 0)) / denom1
-                p2 = float(vc2.get(cat, 0)) / denom2
-                rows.append(
-                    {
-                        "feature": f"{feat}={cat}",
-                        f"cluster_{c1}_%": f"{p1*100:.1f}%",
-                        f"cluster_{c2}_%": f"{p2*100:.1f}%",
-                        "_diff": abs(p1 - p2),
-                    }
-                )
+        rows = pct_rows(df_norm, features, mask1, mask2, f"cluster_{c1}_%", f"cluster_{c2}_%")
 
         df = pd.DataFrame(rows).sort_values("_diff", ascending=False).head(top_n).drop(columns="_diff")
         results[(int(c1), int(c2))] = df.reset_index(drop=True)
@@ -1064,36 +912,81 @@ def build_raw_pairwise_tables(df_raw, labels_aligned, pairs, top_n=15):
     return results
 
 
-def pam_cluster_profiles_main():
-    labels = pam_labels_by_k[K].astype(int)
-
-    clusters = sorted(np.unique(labels))
-
-    size_rows = [
-        {
-            "cluster": int(c),
-            "count": int(np.sum(labels == c)),
-            "percent": round(int(np.sum(labels == c)) / len(labels) * 100, 1),
-        }
-        for c in clusters
-    ]
-    size_df = pd.DataFrame(size_rows)
-    display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
+def _same_answers(values, *features):
+    values_list = [values] if isinstance(values, str) else list(values)
+    return {feature: values_list.copy() for feature in features}
 
 
-    df_raw = df_drivers.copy()
-    labels_raw = _align_labels_by_respondent_id(df_raw, labels, out["respondent_id"])
-    make_all_raw_feature_plots(df_raw, labels_raw)
+SELECTED = {
+    0: {
+        "prev_boss": ["Yes"],
+        "bad_conseq_mh_boss": ["Maybe"],
+        "anonymity_protected": ["I don't know"],
+        "prev_boss_mh_discuss": ["None did"],
+        "boss_mh_discuss": ["No"],
+    },
+    1: {
+        **_same_answers("No", "resources", "bad_conseq_ph_boss", "mh_interview", "mh_comfort_coworkers", "mh_comfort_supervisor"),
+        **_same_answers("I don't know", "mh_ph_boss_serious", "anonymity_protected"),
+        "mh_options_known": ["Yes"],
+        "boss_mh_discuss": ["None did"],
+        "bad_conseq_mh_boss": ["Maybe"],
+    },
+    2: {
+        **_same_answers(["No", "I don't know"], "resources", "mh_ph_boss_serious"),
+        **_same_answers(["Some of them", "Yes, all of them"], "bad_conseq_mh_prev_boss", "prev_observed_bad_conseq_mh"),
+        "prev_resources": ["Some did", "Yes, they all did"],
+        "bad_conseq_mh_boss": ["Maybe"],
+        "boss_mh_discuss": ["No"],
+        "prev_boss_mh_discuss": ["None did"],
+    },
+    3: {
+        **_same_answers("No", "boss_mh_discuss", "mh_ph_boss_serious", "mh_comfort_supervisor", "mh_comfort_coworkers", "mh_interview", "ph_interview"),
+        **_same_answers("Yes", "bad_conseq_mh_boss", "mh_family_history"),
+        "anonymity_protected": ["I don't know", "No"],
+        "leave_easy": ["Very difficult", "Somewhat difficult"],
+        "ever_observed_mhd_bad_response": ["Yes, I observed", "Yes, I experienced"],
+        "prev_benefits": ["No, none did"],
+    },
+    4: {
+        **_same_answers("I don't know", "prev_anonymity_protected", "anonymity_protected"),
+        **_same_answers("No", "boss_mh_discuss", "mh_family_history"),
+        "bad_conseq_mh_boss": ["No", "Maybe"],
+        "prev_observed_bad_conseq_mh": ["None of them"],
+    },
+    5: {
+        **_same_answers("Yes", "mh_options_known", "mh_family_history", "bad_conseq_mh_boss"),
+        **_same_answers("Maybe", "mh_comfort_coworkers", "mh_comfort_supervisor"),
+        "leave_easy": ["Very easy", "Somewhat easy", "Neither easy nor difficult"],
+        "friends_family_mhd_comfort": ["Somewhat open", "Very open"],
+    },
+}
+
+SELECTED_BY_CLUSTER = {
+    cluster_id: [f"{feature}={value}" for feature, values in feature_map.items() for value in values]
+    for cluster_id, feature_map in SELECTED.items()
+}
 
 
-    raw_all = _build_raw_pairwise_diff_matrix(df_raw, labels_raw)
-    heatmap_data = raw_all.loc[raw_all.max(axis=1).sort_values(ascending=False).head(30).index]
-    n_cols = max(1, len(heatmap_data.columns))
-    fig_width = max(10, n_cols * 0.8)
-    fig_height = max(6, len(heatmap_data) * 0.35)
-    plt.figure(figsize=(fig_width, fig_height))
+def heatmap(df_raw, labels_aligned):
+    df_norm, features = _normalize_categorical_frame(df_raw)
+    clusters = sorted(np.unique(labels_aligned).tolist())
+    pairs = [(c1, c2) for i, c1 in enumerate(clusters) for c2 in clusters[i + 1:]]
+    cluster_series = pd.Series(labels_aligned, name="cluster")
+
+    rows = []
+    for feat in features:
+        s = df_norm[feat]
+        categories = s.value_counts(dropna=False).index
+        mat = pd.crosstab(cluster_series, s, normalize="index").reindex(index=clusters, columns=categories, fill_value=0.0)
+        for cat in categories:
+            diffs = {f"C{c1}-C{c2}": abs(mat.at[c1, cat] - mat.at[c2, cat]) for c1, c2 in pairs}
+            rows.append({"feature": f"{feat}={cat}", **diffs})
+
+    heatmap_data = pd.DataFrame(rows).set_index("feature").loc[lambda d: d.max(axis=1).nlargest(30).index]
+    plt.figure(figsize=(max(10, len(heatmap_data.columns) * 0.8), max(6, len(heatmap_data) * 0.35)))
     sns.heatmap(heatmap_data, cmap="viridis")
-    plt.title("Raw feature separation (top 30 by max diff) — k=6")
+    plt.title("Raw feature separation (top 30)")
     plt.xticks(rotation=90, ha="center")
     plt.yticks(rotation=0)
     plt.tight_layout()
@@ -1101,104 +994,34 @@ def pam_cluster_profiles_main():
     plt.close()
 
 
-    exclude_subs = {
-        1: ["not applicable"],
-    }
-    raw_tables = build_raw_cluster_vs_rest_tables(
-        df_raw,
-        labels_raw,
-        exclude_answer_substrings=exclude_subs,
-    )
-    selected_by_cluster = {
-        0: [
-            "prev_boss=Yes",
-            "bad_conseq_mh_boss=Maybe",
-            "anonymity_protected=I don't know",
-            "prev_boss_mh_discuss=None did",
-            "boss_mh_discuss=No",
-        ],
-        1: [
-            "resources=No",
-            "mh_options_known=Yes",
-            "boss_mh_discuss=None did",
-            "mh_ph_boss_serious=I don't know",
-            "bad_conseq_ph_boss=No",
-            "bad_conseq_mh_boss=Maybe",
-            "anonymity_protected=I don't know",
-            "mh_interview=No",
-            "mh_comfort_coworkers=No",
-            "mh_comfort_supervisor=No",
-        ],
-        2: [
-            "resources=No",
-            "resources=I don't know",
-            "prev_resources=Some did",
-            "prev_resources=Yes, they all did",
-            "mh_ph_boss_serious=I don't know",
-            "mh_ph_boss_serious=No",
-            "bad_conseq_mh_boss=Maybe",
-            "bad_conseq_mh_prev_boss=Some of them",
-            "bad_conseq_mh_prev_boss=Yes, all of them",
-            "boss_mh_discuss=No",
-            "prev_boss_mh_discuss=None did",
-            "prev_observed_bad_conseq_mh=Some of them",
-            "prev_observed_bad_conseq_mh=Yes, all of them",
-        ],
-        3: [
-            "boss_mh_discuss=No",
-            "mh_ph_boss_serious=No",
-            "bad_conseq_mh_boss=Yes",
-            "anonymity_protected=I don't know",
-            "anonymity_protected=No",
-            "mh_comfort_supervisor=No",
-            "mh_comfort_coworkers=No",
-            "mh_interview=No",
-            "ph_interview=No",
-            "leave_easy=Very difficult",
-            "leave_easy=Somewhat difficult",
-            "mh_family_history=Yes",
-            "ever_observed_mhd_bad_response=Yes, I observed",
-            "ever_observed_mhd_bad_response=Yes, I experienced",
-            "prev_benefits=No, none did",
-        ],
-        4: [
-            "prev_anonymity_protected=I don't know",
-            "anonymity_protected=I don't know",
-            "boss_mh_discuss=No",
-            "bad_conseq_mh_boss=No",
-            "bad_conseq_mh_boss=Maybe",
-            "prev_observed_bad_conseq_mh=None of them",
-            "mh_family_history=No",
-        ],
-        5: [
-            "mh_options_known=Yes",
-            "leave_easy=Very easy",
-            "leave_easy=Somewhat easy",
-            "leave_easy=Neither easy nor difficult",
-            "bad_conseq_mh_boss=Yes",
-            "mh_comfort_coworkers=Maybe",
-            "mh_comfort_supervisor=Maybe",
-            "friends_family_mhd_comfort=Somewhat open",
-            "friends_family_mhd_comfort=Very open",
-            "mh_family_history=Yes",
-        ],
-    }
-    for c in sorted(raw_tables.keys()):
-        display(HTML(f"<b>CLUSTER {c} vs REST (Top deviations)</b>" + raw_tables[c].to_html(index=False)))
-        forced_df = build_raw_cluster_vs_rest_selected(
-            df_raw=df_raw,
-            labels_aligned=labels_raw,
-            cluster_id=c,
-            selected_features=selected_by_cluster[c],
-        )
-        display(HTML(f"<b>CLUSTER {c} vs REST (Selected features)</b>" + forced_df.to_html(index=False)))
-
-
+def pam_cluster_profiles_main():
+    labels = pam_labels_by_k[K].astype(int)
+    exclusion = {1: ["not applicable"]}
     pairs = [(0, 1), (2, 5), (3, 4)]
-    pair_tables = build_raw_pairwise_tables(df_raw, labels_raw, pairs=pairs)
+    size_df = pd.Series(labels).value_counts().sort_index().rename_axis("cluster").reset_index(name="count")
+    size_df["cluster"] = size_df["cluster"].astype(int)
+    size_df["percent"] = (size_df["count"] / len(labels) * 100).round(1)
+
+    def show_table(title, df):
+        display(HTML(f"<b>{title}</b>" + df.to_html(index=False)))
+
+    display(HTML("<b>k=6 Cluster Sizes</b>" + size_df.to_html(index=False)))
+
+    df_raw = df_drivers.copy()
+    labels_raw = labels_by_id(df_raw, labels, out["respondent_id"])
+    build_feature_plots(df_raw, labels_raw)
+
+    heatmap(df_raw, labels_raw)
+
+    raw_tables = cluster_vs_rest_table(df_raw, labels_raw, exclude_subs=exclusion)
+    for c, table in sorted(raw_tables.items()):
+        show_table(f"CLUSTER {c} vs REST (Top deviations)", table)
+        show_table(f"CLUSTER {c} vs REST (Selected features)",
+                   build_raw_cluster_vs_rest_selected(df_raw, labels_raw, c, SELECTED_BY_CLUSTER[c]))
+
+    pair_tables = pairwise_tables(df_raw, labels_raw, pairs=pairs)
     for c1, c2 in pairs:
-        title = f"CLUSTER {c1} vs CLUSTER {c2} (Top deviations)"
-        display(HTML("<b>" + title + "</b>" + pair_tables[(c1, c2)].to_html(index=False)))
+        show_table(f"CLUSTER {c1} vs CLUSTER {c2} (Top deviations)", pair_tables[(c1, c2)])
 
 
 pam_cluster_profiles_main()
@@ -1210,369 +1033,147 @@ pam_cluster_profiles_main()
 #%% 
 
 
-def normalize_text_for_matching(x):
-    s = str(x).strip()
-    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
-    s = s.replace("\u00a0", " ")
-    s = s.lower().strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
+def recode_overlay(col, val):
+    s = normalize_text(val, lower=True, normalize_quotes=True)
 
-
-GENDER_TARGET_ORDER = [
-    "Male",
-    "Female",
-    "Transgender Male",
-    "Transgender Female",
-    "Nonbinary / Gender Diverse",
-    "Other",
-    "Prefer Not to Say / Invalid Response",
-]
-
-TRANS_MALE_MARKERS = ["ftm", "f2m", "trans man", "transman", "trans male", "transmale", "male (trans", "transmasc", "trans masc"]
-TRANS_FEMALE_MARKERS = ["mtf", "m2f", "trans woman", "transwoman", "trans female", "transfemale", "transfeminine", "trans feminine", "other/transfeminine"]
-NONBINARY_MARKERS = [
-    "nonbinary", "non-binary", "enby", "genderqueer", "agender", "genderfluid",
-    "bigender", "androgynous", "genderflux", "multi-gender", "multigender", "gender diverse",
-]
-
-def recode_gender(val):
-    s = normalize_text_for_matching(val)
-
-    sp = re.sub(r"[^a-z0-9\s\-\/]", " ", s)
-    sp = re.sub(r"\s+", " ", sp).strip()
-
-    if any(marker in sp for marker in TRANS_MALE_MARKERS):
-        return "Transgender Male"
-    if any(marker in sp for marker in TRANS_FEMALE_MARKERS):
-        return "Transgender Female"
-
-    if any(marker in sp for marker in NONBINARY_MARKERS):
-        return "Nonbinary / Gender Diverse"
-    toks = sp.split()
-    if "nb" in toks or any(t.startswith("nb") for t in toks):
-        return "Nonbinary / Gender Diverse"
-    if "queer" in toks and ("male" not in toks and "female" not in toks):
-        return "Nonbinary / Gender Diverse"
-
-    tokens = set(toks)
-
-
-    if sp == "mail":
-        return "Male"
-
-
-    if ("male" in tokens) or ("man" in tokens) or ("dude" in tokens) or (sp == "m") or ("sex is male" in sp) or ("cis male" in sp) or ("cis man" in sp):
-        if "female" not in tokens and "woman" not in tokens:
+    if col == "gender":
+        sp = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s\-\/]", " ", s)).strip()
+        tokens = set(sp.split())
+        if sp in {"m", "mail"} or ("male" in tokens and "female" not in tokens) or ("man" in tokens and "woman" not in tokens):
             return "Male"
-
-    if ("female" in tokens) or ("woman" in tokens) or (sp == "f") or ("cis female" in sp) or ("cis-woman" in sp) or ("cisgender female" in sp):
-        if "male" not in tokens and "man" not in tokens:
+        if sp == "f" or ("female" in tokens and "male" not in tokens) or ("woman" in tokens and "man" not in tokens):
             return "Female"
+        return "Other"
 
-    return "Other"
+    if col == "age":
+        v = pd.to_numeric(s, errors="coerce")
+        if not np.isfinite(v):
+            return "NA"
+        for upper, label in (
+            (20, "less than 20"),
+            (26, "from 20 to 25"),
+            (31, "from 26 to 30"),
+            (36, "from 31 to 35"),
+            (41, "from 36 to 40"),
+            (51, "from 41 to 50"),
+            (np.inf, "more than 51"),
+        ):
+            if v < upper:
+                return label
 
+    if col == "med_pro_condition":
+        if any(k in s for k in ("no diagnosis", "no dx", "none", "healthy", "no condition", "no mental")):
+            return "No diagnosis/NA"
+        if ("mood" in s) and ("disorder" in s):
+            return "Mood disorder"
+        if ("anxiety" in s) and ("disorder" in s):
+            return "anxiety disorder"
+        return "other"
 
-AGE_LABELS = [
-    "less than 20",
-    "from 20 to 25",
-    "from 26 to 30",
-    "from 31 to 35",
-    "from 36 to 40",
-    "from 41 to 50",
-    "more than 51",
-]
+    if col == "work_position":
+        has_fe = ("front-end" in s) or ("front end" in s)
+        has_be = ("back-end" in s) or ("back end" in s)
+        has_designer = "designer" in s
+        for label, tokens in (
+            ("Sales", ("sales",)),
+            ("Dev Evangelist/Advocate", ("dev evangelist", "developer evangelist", "advocat")),
+            ("Leadership (Supervisor/Exec)", ("supervisor/team lead", "team lead", "supervisor", "executive leadership", "executive")),
+            ("DevOps/SysAdmin", ("devops", "sysadmin", "sys admin", "sys-admin")),
+            ("Support", ("support",)),
+        ):
+            if any(token in s for token in tokens):
+                return label
+        if has_fe and has_be:
+            return "Full-stack (FE+BE)"
+        if has_fe:
+            return "Front-end Developer"
+        if has_be:
+            return "Back-end Developer"
+        if has_designer:
+            return "Designer"
+        return "other"
 
-def recode_age(val):
-    v = pd.to_numeric(val, errors="coerce")
-    if not np.isfinite(v):
-        return "NA"
-    v = float(v)
-
-
-    if v < 20:
-        return "less than 20"
-    if 20 <= v <= 25:
-        return "from 20 to 25"
-    if 26 <= v <= 30:
-        return "from 26 to 30"
-    if 31 <= v <= 35:
-        return "from 31 to 35"
-    if 36 <= v <= 40:
-        return "from 36 to 40"
-    if 41 <= v <= 50:
-        return "from 41 to 50"
-    if v >= 51:
-        return "more than 51"
-    return "NA"
-
-
-EU_COUNTRIES = {
-    "austria","belgium","bulgaria","croatia","cyprus","czech republic","czechia","denmark","estonia","finland",
-    "france","germany","greece","hungary","ireland","italy","latvia","lithuania","luxembourg","malta","netherlands",
-    "poland","portugal","romania","slovakia","slovenia","spain","sweden"
-}
-OTHER_EUROPE = {
-    "norway","switzerland","iceland","serbia","bosnia and herzegovina","bosnia & herzegovina","bosnia",
-    "ukraine","belarus","albania","north macedonia","macedonia","montenegro","moldova","georgia","armenia","azerbaijan"
-}
-MIDDLE_EAST = {"israel","iran","iraq","jordan","lebanon","saudi arabia","united arab emirates","uae","qatar","kuwait","oman","yemen","syria","turkey"}
-ASIA = {"india","pakistan","bangladesh","sri lanka","nepal","bhutan","china","hong kong","taiwan","japan","south korea","korea","vietnam","thailand","malaysia","singapore","indonesia","philippines","myanmar","cambodia","laos","mongolia","afghanistan"}
-OCEANIA = {"australia","new zealand"}
-AFRICA = {"south africa","nigeria","kenya","ghana","egypt","morocco","algeria","tunisia","ethiopia","uganda","tanzania","zambia","zimbabwe","namibia","botswana"}
-LATAM = {"mexico","brazil","argentina","colombia","chile","peru","ecuador","uruguay","paraguay","bolivia","venezuela","guatemala","costa rica","panama","honduras","el salvador","nicaragua","dominican republic","cuba","haiti","jamaica","trinidad and tobago"}
-REGION_SETS = [
-    (EU_COUNTRIES, "European Union"),
-    (OTHER_EUROPE, "Other Europe"),
-    (MIDDLE_EAST, "Middle East"),
-    (OCEANIA, "Oceania"),
-    (ASIA, "Asia"),
-    (AFRICA, "Africa"),
-    (LATAM, "Latin America & Caribbean"),
-]
-
-def recode_country_region(val):
-    s = normalize_text_for_matching(val)
-
-    s = s.replace("u.s.", "us").replace("u.s.a.", "usa").replace("united states", "united states of america")
-    s = s.replace("england", "united kingdom").replace("scotland", "united kingdom").replace("wales", "united kingdom")
-    if s in {"uk", "u.k."}:
-        s = "united kingdom"
-
-    if s in {"united states of america", "usa", "us", "united states"}:
-        return "US"
-    if s == "united kingdom":
-        return "UK"
-    if s == "canada":
-        return "Canada"
-
-    for region_set, region_label in REGION_SETS:
-        if s in region_set:
-            return region_label
-
-    if "united states" in s:
-        return "US"
-    if "kingdom" in s:
-        return "UK"
-
-    return "Other/NA"
+    raise ValueError(col)
 
 
-MED_GROUPS_ORDER = [
-    "No diagnosis/NA",
-    "Mood disorder",
-    "anxiety disorder",
-    "other",
-]
+def cluster_stats(series, labels, max_categories, min_prop):
+    s = normalize_text(series, na_label="NA")
+    for keep in (
+        lambda vc: vc.index[:max_categories],
+        lambda vc: vc.index[(vc / len(s)) >= min_prop],
+    ):
+        vc = s.value_counts(dropna=False)
+        s = s.where(s.isin(keep(vc)), other="Other")
 
-def recode_med_condition(val):
-    s = normalize_text_for_matching(val)
-
-
-    if any(k in s for k in ["no diagnosis", "no dx", "none", "healthy", "no condition", "no mental"]):
-        return "No diagnosis/NA"
-
-    if ("mood" in s) and ("disorder" in s):
-        return "Mood disorder"
-    if ("anxiety" in s) and ("disorder" in s):
-        return "anxiety disorder"
-
-    return "other"
-
-
-WORK_ORDER = [
-    "Sales",
-    "Dev Evangelist/Advocate",
-    "Leadership (Supervisor/Exec)",
-    "DevOps/SysAdmin",
-    "Support",
-    "Full-stack (FE+BE)",
-    "Front-end Developer",
-    "Back-end Developer",
-    "Designer",
-    "other",
-    "NA",
-]
-
-WORK_POSITION_REPLACEMENTS = {
-    "decops": "devops",
-    "front'end": "front-end",
-    "frontend": "front-end",
-    "backend": "back-end",
-    "sys admin": "sysadmin",
-    "sys-admin": "sysadmin",
-}
-
-WORK_CLASSIFIER_RULES = [
-    ("Sales", lambda s: "sales" in s),
-    ("Dev Evangelist/Advocate", lambda s: any(n in s for n in ["dev evangelist", "developer evangelist", "advocat", "advocate"])),
-    ("Leadership (Supervisor/Exec)", lambda s: any(n in s for n in ["supervisor/team lead", "team lead", "supervisor", "executive leadership", "executive"])),
-    ("DevOps/SysAdmin", lambda s: any(n in s for n in ["devops", "sysadmin", "sys admin", "sys-admin"])),
-    ("Support", lambda s: "support" in s),
-]
-
-def recode_work_position(val):
-    s = normalize_text_for_matching(val)
-
-    for old, new in WORK_POSITION_REPLACEMENTS.items():
-        s = s.replace(old, new)
-
-    has_fe = any(marker in s for marker in ["front-end developer", "front end developer", "front-end"])
-    has_be = any(marker in s for marker in ["back-end developer", "back end developer", "back-end"])
-    has_designer = "designer" in s
-
-    for label, predicate in WORK_CLASSIFIER_RULES:
-        if predicate(s):
-            return label
-    if has_fe and has_be:
-        return "Full-stack (FE+BE)"
-    if has_fe and not has_be:
-        return "Front-end Developer"
-    if has_be and not has_fe:
-        return "Back-end Developer"
-    if has_designer:
-        return "Designer"
-    return "other"
-
-
-def _normalize_overlay_categorical(series):
-    return series.astype(object).where(series.notna(), "NA").astype(str).str.strip().replace({"": "NA"})
-
-
-def plot_categorical_stacked_by_cluster(series, labels, title, category_order=(), legend_title="Answer", min_prop_to_keep=0.0, max_categories=10**9, ax=None):
-    s = _normalize_overlay_categorical(series)
-
-    overall = s.value_counts(dropna=False)
-    total_n = float(len(s))
-    cats = overall.index.tolist()
-
-
-    keep = set(cats[:max_categories])
-    s = s.where(s.isin(keep), other="Other")
-    overall = s.value_counts(dropna=False)
-    cats = overall.index.tolist()
-
-    keep = set(overall[(overall / total_n) >= min_prop_to_keep].index.tolist())
-    s = s.where(s.isin(keep), other="Other")
-    overall = s.value_counts(dropna=False)
-    cats = overall.index.tolist()
-
-    ordered = [c for c in category_order if c in cats]
-    extras = [c for c in cats if c not in ordered]
-    cats = ordered + extras
-
-    clusters = sorted(np.unique(labels).astype(int).tolist())
-
-    mat = []
-    for cluster_id in clusters:
-        cluster_series = s[labels == cluster_id]
-        cluster_value_counts = cluster_series.value_counts(dropna=False)
-        denom = float(len(cluster_series))
-        mat.append([float(cluster_value_counts.get(cat, 0)) / denom for cat in cats])
-
-    mat = np.asarray(mat, dtype=float)
-
-    x = np.arange(len(clusters))
-    bottom = np.zeros(len(clusters), dtype=float)
-
-    for j, cat in enumerate(cats):
-        ax.bar(
-            x,
-            mat[:, j],
-            bottom=bottom,
-            label=str(cat),
-            edgecolor="none",
-            linewidth=0.0,
-            antialiased=False,
-        )
-        bottom += mat[:, j]
-
-    ax.set_xticks(x, [str(c) for c in clusters])
-    ax.set_ylim(0, 1.0)
-    ax.set_xlabel("Cluster")
-    ax.set_ylabel("Proportion within cluster")
-    ax.set_title(title)
-    ax.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
-
-
-def dominant_answer_table(df, labels, features):
-    clusters = sorted(np.unique(labels).astype(int).tolist())
-    rows = []
-    for cluster_id in clusters:
-        row = {"cluster": cluster_id}
-        for feat in features:
-            s = _normalize_overlay_categorical(df[feat])
-            cluster_series = s[labels == cluster_id]
-            denom = float(len(cluster_series))
-            cluster_value_counts = cluster_series.value_counts(dropna=False)
-            top_val = str(cluster_value_counts.index[0])
-            pct = (cluster_value_counts.iloc[0] / denom) * 100.0
-            row[feat] = f"{top_val} ({pct:.1f}%)"
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def cluster_answer_pct_table(series, labels):
-    s = _normalize_overlay_categorical(series)
-    clusters = sorted(np.unique(labels).astype(int).tolist())
     cats = s.value_counts(dropna=False).index.tolist()
-    rows = []
-    for cluster_id in clusters:
-        cluster_series = s[labels == cluster_id]
-        denom = float(len(cluster_series))
-        cluster_value_counts = cluster_series.value_counts(dropna=False)
-        row = {"cluster": cluster_id}
-        for cat in cats:
-            row[str(cat)] = f"{(cluster_value_counts.get(cat, 0) / denom) * 100:.1f}%"
-        rows.append(row)
-    return pd.DataFrame(rows)
+    labels = np.asarray(labels, dtype=int)
+    clusters = sorted(np.unique(labels).tolist())
+    counts = {c: s[labels == c].value_counts(dropna=False) for c in clusters}
+    totals = {c: float((labels == c).sum()) for c in clusters}
+    return clusters, cats, counts, totals
 
 
 #%% 
-OVERLAY_K = 6
-
-df_over = df_overlays.copy()
-labels = pam_labels_by_k[OVERLAY_K].astype(int)
-labels_aligned = _align_labels_by_respondent_id(df_over, labels, out["respondent_id"])
-df = df_over.copy()
-for col, fn in {
-    "gender": recode_gender,
-    "age": recode_age,
-    "country_live": recode_country_region,
-    "med_pro_condition": recode_med_condition,
-    "work_position": recode_work_position,
-}.items():
-    df[col] = df[col].apply(fn)
+labels = pam_labels_by_k[K].astype(int)
+df = df_overlays.copy()
+labels_aligned = labels_by_id(df, labels, out["respondent_id"])
+for col in ("gender", "age", "med_pro_condition", "work_position"):
+    df[col] = df[col].map(lambda v: recode_overlay(col, v))
 
 
 #%%
-overlay_panels = [
-    [("age", {"category_order": AGE_LABELS + ["NA"]}), ("gender", {"category_order": GENDER_TARGET_ORDER}), ("country_work", {"max_categories": 15, "min_prop_to_keep": 0.01}), ("work_position", {"category_order": WORK_ORDER})],
+OVERLAY_PANELS = [
+    ["age", "gender", ("country_work", 15, 0.01), "work_position"],
     ["mhd_past", "current_mhd", "pro_treatment", "no_treat_mhd_bad_work"],
-    ["mhd_hurt_career", "coworkers_view_neg_mhd", ("med_pro_condition", {"category_order": MED_GROUPS_ORDER}), "mhd_by_med_pro"],
+    ["mhd_hurt_career", "coworkers_view_neg_mhd", "med_pro_condition", "mhd_by_med_pro"],
 ]
-for panel_specs in overlay_panels:
+
+for panel in OVERLAY_PANELS:
     fig, axes = plt.subplots(2, 2, figsize=(16, 8), dpi=150)
-    axes = axes.ravel()
-    for ax, spec in zip(axes, panel_specs):
-        feature, kwargs = spec if isinstance(spec, tuple) else (spec, {})
-        plot_categorical_stacked_by_cluster(
-            series=df[feature],
-            labels=labels_aligned,
-            title=f"Overlay distribution by cluster (k={OVERLAY_K}): {feature}",
-            ax=ax,
-            **kwargs,
-        )
+    for ax, spec in zip(axes.ravel(), panel):
+        feat, max_categories, min_prop = spec if isinstance(spec, tuple) else (spec, 10**9, 0.0)
+        clusters, cats, counts, totals = cluster_stats(df[feat], labels_aligned, max_categories, min_prop)
+        x = np.arange(len(clusters))
+        bottom = np.zeros(len(clusters), dtype=float)
+        for cat in cats:
+            heights = np.array([counts[c].get(cat, 0) / totals[c] for c in clusters], dtype=float)
+            ax.bar(x, heights, bottom=bottom, label=str(cat), edgecolor="none", linewidth=0.0, antialiased=False)
+            bottom += heights
+        ax.set_xticks(x, [str(c) for c in clusters])
+        ax.set_ylim(0, 1.0)
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Proportion within cluster")
+        ax.set_title(f"Overlay distribution by cluster (k={K}): {feat}")
+        ax.legend(title="Answer", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
     plt.tight_layout()
     plt.show()
     plt.close(fig)
 
-#%% 
+#%%
 dom_feats = ["mhd_by_med_pro", "pro_treatment", "mhd_past", "current_mhd", "med_pro_condition"]
-dom_df = dominant_answer_table(df, labels_aligned, dom_feats)
+pct_feats = ["no_treat_mhd_bad_work", "mhd_hurt_career", "coworkers_view_neg_mhd"]
+stats_by_feat = {feat: cluster_stats(df[feat], labels_aligned, 10**9, 0.0) for feat in dom_feats + pct_feats}
+
+#%% 
+clusters = next(iter(stats_by_feat.values()))[0]
+dom_rows = []
+for c in clusters:
+    row = {"cluster": c}
+    for feat in dom_feats:
+        _, _, counts, totals = stats_by_feat[feat]
+        top = counts[c]
+        row[feat] = f"{top.index[0]} ({top.iloc[0] / totals[c] * 100:.1f}%)"
+    dom_rows.append(row)
+dom_df = pd.DataFrame(dom_rows)
 display(HTML("<b>Dominant answers (overlays)</b>" + dom_df.to_html(index=False)))
 
-pct_feats = ["no_treat_mhd_bad_work", "mhd_hurt_career", "coworkers_view_neg_mhd"]
 for feat in pct_feats:
-    pct_df = cluster_answer_pct_table(df[feat], labels_aligned)
+    _, cats, counts, totals = stats_by_feat[feat]
+    pct_rows = []
+    for c in clusters:
+        row = {"cluster": c}
+        for cat in cats:
+            row[str(cat)] = f"{counts[c].get(cat, 0) / totals[c] * 100:.1f}%"
+        pct_rows.append(row)
+    pct_df = pd.DataFrame(pct_rows)
     display(HTML(f"<b>{feat}</b>" + pct_df.to_html(index=False)))
