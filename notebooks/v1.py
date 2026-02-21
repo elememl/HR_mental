@@ -452,21 +452,23 @@ out = out.astype({c: int for c in out.select_dtypes(include=["bool"]).columns})
 #%% 
 
 
-X = out.drop(columns=["respondent_id"]).apply(pd.to_numeric, errors="raise").to_numpy(dtype=np.float64)
-ranges = np.nanmax(X, axis=0) - np.nanmin(X, axis=0)
+X = out.drop(columns=["respondent_id"]).apply(pd.to_numeric, errors="raise").to_numpy(np.float64)
+feature_range = np.nanmax(X, axis=0) - np.nanmin(X, axis=0)
+valid = np.isfinite(feature_range) & (feature_range > 0)
+X, feature_range = X[:, valid], feature_range[valid]
+
 n = X.shape[0]
-valid_feat = np.isfinite(ranges) & (ranges > 0)
-Xv, rv = X[:, valid_feat], ranges[valid_feat]
-finite = np.isfinite(Xv)
+finite = np.isfinite(X)
 D = np.zeros((n, n), dtype=np.float64)
 for i0 in range(0, n, 256):
-    i1 = min(n, i0 + 256)
-    comp = finite[i0:i1, :][:, None, :] & finite[None, :, :]
-    diff = np.abs(Xv[i0:i1, :][:, None, :] - Xv[None, :, :]) / rv[None, None, :]
-    numer = np.where(comp, diff, 0.0).sum(axis=2)
-    denom = comp.sum(axis=2)
-    D[i0:i1, :] = np.where(denom > 0, numer / denom, 1.0)
-D = ((D + D.T) / 2.0).astype(np.float32)
+    i1 = min(i0 + 256, n)
+    comparable = finite[i0:i1, None, :] & finite[None, :, :]
+    diff = np.abs(X[i0:i1, None, :] - X[None, :, :]) / feature_range
+    numer = np.where(comparable, diff, 0.0).sum(axis=2)
+    denom = comparable.sum(axis=2)
+    D[i0:i1] = np.divide(numer, denom, out=np.ones_like(numer), where=denom > 0)
+
+D = ((D + D.T) * 0.5).astype(np.float32)
 np.fill_diagonal(D, 0.0)
 
 
@@ -477,8 +479,10 @@ np.fill_diagonal(D, 0.0)
 #%% 
 
 
-K_LIST = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+K_LIST = range(3, 14)
 RANDOM_STATE = 42
+SIL_QUANTILES = (25, 50, 75)
+SIL_COLS = ["sil_avg", *(f"sil_q{q}" for q in SIL_QUANTILES)]
 
 
 rows = []
@@ -488,33 +492,22 @@ for k in K_LIST:
     labels_k = model.fit_predict(D)
     sil = silhouette_samples(D, labels_k, metric="precomputed")
     sizes = np.bincount(labels_k, minlength=k)
+    sil_stats = {"sil_avg": float(np.mean(sil))}
+    sil_stats.update({f"sil_q{q}": float(v) for q, v in zip(SIL_QUANTILES, np.percentile(sil, SIL_QUANTILES))})
     pam_labels_by_k[k] = labels_k.astype(np.int32)
-    rows.append({
-        "k": int(k),
-        "silhouette_avg": float(np.mean(sil)),
-        "silhouette_q25": float(np.percentile(sil, 25)),
-        "silhouette_q50": float(np.percentile(sil, 50)),
-        "silhouette_q75": float(np.percentile(sil, 75)),
-        "cluster_sizes": sizes.tolist(),
-    })
+    rows.append({"k": k, **sil_stats, "cluster_sizes": sizes.tolist()})
 
 
-df = pd.DataFrame(rows).sort_values("k")
-df_table = df[["k", "silhouette_avg", "silhouette_q25", "silhouette_q50", "silhouette_q75", "cluster_sizes"]].copy()
-df_table = df_table.rename(columns={
-    "silhouette_avg": "sil_avg",
-    "silhouette_q25": "sil_q25",
-    "silhouette_q50": "sil_q50",
-    "silhouette_q75": "sil_q75",
-})
-df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]] = df_table[["sil_avg", "sil_q25", "sil_q50", "sil_q75"]].round(4)
+pam_summary = pd.DataFrame(rows).sort_values("k")
+df_table = pam_summary[["k", *SIL_COLS, "cluster_sizes"]].round({c: 4 for c in SIL_COLS})
 
 #%% 
 display(HTML(df_table.to_html(index=False)))
 
 
-k_values = df["k"].to_numpy(dtype=int)
-sil = df["silhouette_avg"].to_numpy(dtype=float)
+k_values = pam_summary["k"].to_numpy(dtype=int)
+sil = pam_summary["sil_avg"].to_numpy(dtype=float)
+cluster_sizes = pam_summary["cluster_sizes"].tolist()
 fig, ax = plt.subplots(figsize=(8, 4.5))
 ax.plot(k_values, sil, marker="o")
 ax.set_title("Silhouette vs k")
@@ -526,10 +519,8 @@ fig.tight_layout()
 plt.show()
 plt.close(fig)
 
-k_values = df["k"].tolist()
-size_lists = df["cluster_sizes"].tolist()
 fig, ax = plt.subplots(figsize=(10, 4.8))
-ax.boxplot(size_lists, tick_labels=[str(k) for k in k_values], showfliers=True)
+ax.boxplot(cluster_sizes, tick_labels=k_values.astype(str), showfliers=True)
 ax.set_title("Cluster size distribution by k")
 ax.set_xlabel("k")
 ax.set_ylabel("Cluster size")
@@ -547,190 +538,64 @@ plt.close(fig)
 
 
 K = 6
+labels = pam_labels_by_k[K].astype(int)
+n_components = 3
+n = D.shape[0]
+J = np.eye(n) - np.ones((n, n)) / n
+B = -0.5 * (J @ (D ** 2) @ J)
+evals, evecs = np.linalg.eigh((B + B.T) * 0.5)
+idx = evals.argsort()[::-1]
+evals, evecs = evals[idx], evecs[:, idx]
+pos = evals > 1e-12
+m = min(n_components, int(pos.sum()))
+evals_pos, evecs_pos = evals[pos][:m], evecs[:, pos][:, :m]
+coords = evecs_pos * np.sqrt(evals_pos)
+explained = evals_pos / evals_pos.sum()
 
 
-def pcoa(D, n_components=3):
-    n = D.shape[0]
-    D2 = D ** 2
+def plot_embedding(embedding, labels, title, axis_labels):
+    dims = embedding.shape[1]
+    is_3d = dims == 3
+    fig = plt.figure(figsize=(11, 8) if is_3d else (10, 7), dpi=150)
+    ax = fig.add_subplot(111, projection="3d" if is_3d else None)
 
-    J = np.eye(n) - np.ones((n, n)) / n
-    B = -0.5 * (J @ D2 @ J)
+    for c in np.unique(labels):
+        pts = embedding[labels == c]
+        ax.scatter(*pts[:, :dims].T, s=10, alpha=0.8, label=f"Cluster {c}")
 
+    ax.set_xlabel(axis_labels[0])
+    ax.set_ylabel(axis_labels[1])
+    if is_3d:
+        ax.set_zlabel(axis_labels[2])
+    ax.set_title(title)
 
-    B = 0.5 * (B + B.T)
+    legend_kws = {"markerscale": 1.5, "frameon": False}
+    if is_3d:
+        legend_kws.update({"loc": "center left", "bbox_to_anchor": (1.02, 0.5), "borderaxespad": 0.0})
+        fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
+    else:
+        fig.tight_layout()
+    ax.legend(**legend_kws)
 
-
-    evals, evecs = np.linalg.eigh(B)
-
-
-    idx = np.argsort(evals)[::-1]
-    evals = evals[idx]
-    evecs = evecs[:, idx]
-
-
-    pos_mask = evals > 1e-12
-    evals_pos = evals[pos_mask]
-    evecs_pos = evecs[:, pos_mask]
-
-    m = min(n_components, evals_pos.size)
-    evals_pos = evals_pos[:m]
-    evecs_pos = evecs_pos[:, :m]
-
-    coords = evecs_pos * np.sqrt(evals_pos)
-
-    explained = evals_pos / np.sum(evals_pos)
-    return coords, explained
-
-
-def plot_pcoa_2d(coords, explained, labels):
-    x = coords[:, 0]
-    y = coords[:, 1]
-    clusts = np.unique(labels)
-
-    plt.figure(figsize=(10, 7), dpi=150)
-    for c in clusts:
-        mask = labels == c
-        plt.scatter(x[mask], y[mask], s=10, alpha=0.8, label=f"Cluster {c}")
-
-    xlab = f"PCoA1 ({explained[0]*100:.1f}%)"
-    ylab = f"PCoA2 ({explained[1]*100:.1f}%)"
-    plt.xlabel(xlab)
-    plt.ylabel(ylab)
-    plt.title("PCoA (Gower) – k=6 clusters (2D)")
-    plt.legend(markerscale=1.5, frameon=False)
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-
-
-def plot_pcoa_3d(coords, explained, labels):
-    from mpl_toolkits.mplot3d import Axes3D
-
-    x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
-    clusts = np.unique(labels)
-
-    fig = plt.figure(figsize=(11, 8), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
-
-    for c in clusts:
-        mask = labels == c
-        ax.scatter(x[mask], y[mask], z[mask], s=10, alpha=0.8, label=f"Cluster {c}")
-
-    xlab = f"PCoA1 ({explained[0]*100:.1f}%)"
-    ylab = f"PCoA2 ({explained[1]*100:.1f}%)"
-    zlab = f"PCoA3 ({explained[2]*100:.1f}%)"
-
-    ax.set_xlabel(xlab)
-    ax.set_ylabel(ylab)
-    ax.set_zlabel(zlab)
-    ax.set_title("PCoA (Gower) – k=6 clusters (3D)")
-    ax.legend(
-        markerscale=1.5,
-        frameon=False,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-    )
-
-
-    fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
     plt.show()
     plt.close(fig)
 
 
-D = D.astype(float)
-D = 0.5 * (D + D.T)
-np.fill_diagonal(D, 0.0)
-labels = pam_labels_by_k[K].astype(int)
-
-
-coords, explained = pcoa(D, n_components=3)
-
-
-plot_pcoa_2d(coords[:, :2], explained[:2], labels)
-plot_pcoa_3d(coords[:, :3], explained[:3], labels)
+plot_embedding(coords[:, :2], labels, f"PCoA (Gower) - k={K} clusters (2D)",
+               [f"PCoA1 ({explained[0]*100:.1f}%)", f"PCoA2 ({explained[1]*100:.1f}%)"])
+plot_embedding(coords[:, :3], labels, f"PCoA (Gower) - k={K} clusters (3D)",
+               [f"PCoA1 ({explained[0]*100:.1f}%)", f"PCoA2 ({explained[1]*100:.1f}%)", f"PCoA3 ({explained[2]*100:.1f}%)"])
 
 
 #%% 
 
 
-def fit_umap_precomputed_gower(D, n_components=2, n_neighbors=6, min_dist=0.5, random_state=42, spread=2):
-    reducer = UMAP(
-        n_components=n_components,
-        metric="precomputed",
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-        random_state=random_state,
-        spread=spread,
-        n_jobs=1,
-    )
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*using precomputed metric; inverse_transform will be unavailable.*",
-            category=UserWarning,
-            module=r"umap\.umap_",
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*n_jobs value 1 overridden to 1 by setting random_state.*",
-            category=UserWarning,
-            module=r"umap\.umap_",
-        )
-        emb = reducer.fit_transform(D)
-    return emb
+UMAP_KW = dict(metric="precomputed", n_neighbors=6, min_dist=0.5, random_state=42, spread=2, n_jobs=1)
+umap_2d = UMAP(n_components=2, **UMAP_KW).fit_transform(D)
+umap_3d = UMAP(n_components=3, **UMAP_KW).fit_transform(D)
 
-
-def plot_umap_2d(embedding, labels):
-    clusts = np.unique(labels)
-
-    plt.figure(figsize=(10, 7), dpi=150)
-    for c in clusts:
-        mask = labels == c
-        plt.scatter(embedding[mask, 0], embedding[mask, 1], s=10, alpha=0.8, label=f"Cluster {c}")
-
-    plt.xlabel("UMAP1")
-    plt.ylabel("UMAP2")
-    plt.title("UMAP (precomputed Gower) – k=6 clusters (2D)")
-    plt.legend(markerscale=1.5, frameon=False)
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-
-
-def plot_umap_3d(embedding, labels):
-    from mpl_toolkits.mplot3d import Axes3D
-
-    clusts = np.unique(labels)
-    fig = plt.figure(figsize=(11, 8), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
-
-    for c in clusts:
-        mask = labels == c
-        ax.scatter(embedding[mask, 0], embedding[mask, 1], embedding[mask, 2], s=10, alpha=0.8, label=f"Cluster {c}")
-
-    ax.set_xlabel("UMAP1")
-    ax.set_ylabel("UMAP2")
-    ax.set_zlabel("UMAP3")
-    ax.set_title("UMAP (precomputed Gower) – k=6 clusters (3D)")
-    ax.legend(
-        markerscale=1.5,
-        frameon=False,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-    )
-    fig.subplots_adjust(left=0.02, right=0.80, top=0.92, bottom=0.06)
-    plt.show()
-    plt.close(fig)
-
-
-UMAP_EMBEDDING_2D = fit_umap_precomputed_gower(D=D)
-UMAP_EMBEDDING_3D = fit_umap_precomputed_gower(D=D, n_components=3)
-
-plot_umap_2d(UMAP_EMBEDDING_2D, labels)
-plot_umap_3d(UMAP_EMBEDDING_3D, labels)
-
+plot_embedding(umap_2d, labels, f"UMAP (precomputed Gower) - k={K} clusters (2D)", ["UMAP1", "UMAP2"])
+plot_embedding(umap_3d, labels, f"UMAP (precomputed Gower) - k={K} clusters (3D)", ["UMAP1", "UMAP2", "UMAP3"])
 #%% [markdown]
 # ### 9. Stability Validation
 # Robustness across neighboring k values is assessed using ARI, overlap statistics, and Sankey-style flow summaries.
@@ -739,128 +604,55 @@ plot_umap_3d(UMAP_EMBEDDING_3D, labels)
 
 
 KS = [4, 5, 6, 7]
-
-
-SPLIT_THRESHOLD = 0.80
-
-
-def stability_metrics_for_transition(k_from, k_to, labels_from, labels_to, split_threshold=0.80):
-    contingency_df = pd.crosstab(
-        pd.Series(labels_from, name="from"),
-        pd.Series(labels_to, name="to"),
-        normalize=False,
-        dropna=False,
-    )
-    row_sums = contingency_df.sum(axis=1).replace(0, np.nan)
-    row_pct = contingency_df.div(row_sums, axis=0).astype(float).fillna(0.0)
-
-
-    max_row = row_pct.max(axis=1).to_numpy(dtype=float)
-
-    ent_values = []
-    for i in row_pct.index:
-        probs = row_pct.loc[i].to_numpy(dtype=float)
-        probs = probs[probs > 0]
-        ent_values.append(float(-(probs * np.log(probs)).sum()))
-    row_entropy = np.array(ent_values, dtype=float)
-    eff_targets = np.exp(row_entropy)
-
-
-    weights = contingency_df.sum(axis=1).to_numpy(dtype=float)
-    weights_sum = float(weights.sum())
-    avg_max = float((max_row * weights).sum() / weights_sum)
-    med_max = float(np.median(max_row))
-    med_entropy = float(np.median(row_entropy))
-    med_eff_targets = float(np.median(eff_targets))
-    pct_split = float((max_row < split_threshold).mean() * 100.0)
-
-    return {
-        "transition": f"{k_from}->{k_to}",
-        "avg_max_row_overlap": avg_max,
-        "median_max_row_overlap": med_max,
-        "median_row_entropy": med_entropy,
-        "pct_clusters_split": pct_split,
-        "effective_num_targets_median": med_eff_targets
-    }
-def make_sankey_global(k_values, label_map):
-    all_flows = []
-
-    for k_from, k_to in zip(k_values[:-1], k_values[1:]):
-        contingency_df = pd.crosstab(
-            pd.Series(label_map[k_from], name="from"),
-            pd.Series(label_map[k_to], name="to"),
-            normalize=False,
-            dropna=False,
-        )
-        flows = contingency_df.stack().rename("value").reset_index()
-        flows = flows[flows["value"] > 0]
-        flows["source"] = flows["from"].map(lambda c: f"k{k_from}_c{int(c)}")
-        flows["target"] = flows["to"].map(lambda c: f"k{k_to}_c{int(c)}")
-        all_flows.append(flows[["source", "target", "value"]])
-
-    flow_df = pd.concat(all_flows, ignore_index=True)
-    node_names = flow_df["source"].tolist() + flow_df["target"].tolist()
-    node_index = {name: idx for idx, name in enumerate(dict.fromkeys(node_names))}
-    sources = flow_df["source"].map(node_index).astype(int).tolist()
-    targets = flow_df["target"].map(node_index).astype(int).tolist()
-    values = flow_df["value"].astype(int).tolist()
-    node_labels = [name for name, _ in sorted(node_index.items(), key=lambda kv: kv[1])]
-
-    fig = go.Figure(
-        data=[
-            go.Sankey(
-                node=dict(label=node_labels, pad=15, thickness=14),
-                link=dict(source=sources, target=targets, value=values),
-            )
-        ]
-    )
-    fig.update_layout(
-        title_text=f"Global Sankey: {' → '.join([f'k{k}' for k in k_values])} (adjacent transitions)",
-        font_size=11,
-    )
-    display(HTML(fig.to_html(include_plotlyjs='cdn')))
-
-
 warnings.filterwarnings("ignore", category=MatplotlibDeprecationWarning)
 
-
 label_map = {k: pam_labels_by_k[k].astype(int) for k in KS}
-
-
-ari_rows = []
-for i in range(len(KS)):
-    for j in range(i + 1, len(KS)):
-        k1, k2 = KS[i], KS[j]
-        ari = float(adjusted_rand_score(label_map[k1], label_map[k2]))
-        ari_rows.append({"k1": k1, "k2": k2, "ARI": ari})
-
-ari_df = pd.DataFrame(ari_rows).sort_values(["k1", "k2"]).reset_index(drop=True)
+adjacent_transitions = list(zip(KS[:-1], KS[1:]))
+ari_df = pd.DataFrame([{"k1": k1, "k2": k2, "ARI": float(adjusted_rand_score(label_map[k1], label_map[k2]))}
+                       for i, k1 in enumerate(KS) for k2 in KS[i + 1:]]).sort_values(["k1", "k2"]).reset_index(drop=True)
 #%% 
 display(HTML(ari_df.to_html(index=False)))
 
 
-stability_rows = []
-for k_from, k_to in zip(KS[:-1], KS[1:]):
-    metrics = stability_metrics_for_transition(
-        k_from=k_from,
-        k_to=k_to,
-        labels_from=label_map[k_from],
-        labels_to=label_map[k_to],
-        split_threshold=SPLIT_THRESHOLD,
+stability_rows, all_flows = [], []
+for k_from, k_to in adjacent_transitions:
+    labels_from, labels_to = label_map[k_from], label_map[k_to]
+    contingency_df = pd.crosstab(pd.Series(labels_from, name="from"), pd.Series(labels_to, name="to"), normalize=False, dropna=False)
+    row_pct = contingency_df.div(contingency_df.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    max_row = row_pct.max(axis=1).to_numpy(dtype=float)
+    probs = row_pct.to_numpy(dtype=float)
+    row_entropy = -(np.where(probs > 0, probs * np.log(probs), 0.0)).sum(axis=1)
+    eff_targets = np.exp(row_entropy)
+    weights = contingency_df.sum(axis=1).to_numpy(dtype=float)
+    stability_rows.append({
+        "transition": f"{k_from}→{k_to}",
+        "avg_max_row_overlap": float((max_row * weights).sum() / weights.sum()),
+        "median_max_row_overlap": float(np.median(max_row)),
+        "median_row_entropy": float(np.median(row_entropy)),
+        "pct_clusters_split": float((max_row < 0.80).mean() * 100.0),
+        "effective_num_targets_median": float(np.median(eff_targets)),
+    })
+
+    all_flows.append(
+        contingency_df.stack().rename("value").reset_index().query("value > 0").assign(
+            source=lambda d: d["from"].map(lambda c: f"k{k_from}_c{int(c)}"),
+            target=lambda d: d["to"].map(lambda c: f"k{k_to}_c{int(c)}"),
+        )[["source", "target", "value"]]
     )
-    stability_rows.append(metrics)
 
-stability_df = pd.DataFrame(stability_rows)
-show = stability_df.copy()
-for c in ["avg_max_row_overlap", "median_max_row_overlap", "median_row_entropy", "effective_num_targets_median"]:
-    show[c] = show[c].round(3)
-show["pct_clusters_split"] = show["pct_clusters_split"].round(1)
+stability_table = pd.DataFrame(stability_rows).round(2)
 #%% 
-display(HTML(show.to_html(index=False)))
+display(HTML(stability_table.to_html(index=False)))
 
 
 #%% 
-make_sankey_global(KS, label_map)
+flow_df = pd.concat(all_flows, ignore_index=True)
+node_labels = pd.unique(pd.concat([flow_df["source"], flow_df["target"]])).tolist()
+node_index = {name: i for i, name in enumerate(node_labels)}
+links = flow_df[["source", "target", "value"]].replace({"source": node_index, "target": node_index}).astype(int)
+fig = go.Figure(data=[go.Sankey(node=dict(label=node_labels, pad=15, thickness=14), link=links.to_dict("list"))])
+fig.update_layout(title_text=f"Global Sankey: {' → '.join([f'k{k}' for k in KS])} (adjacent transitions)", font_size=11)
+display(HTML(fig.to_html(include_plotlyjs="cdn")))
 
 
 #%% [markdown]
